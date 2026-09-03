@@ -4,3 +4,6 @@ frontend/dist
 backend/dist
 .DS_Store
 *.log
+
+backend/uploads/
+*.tsbuildinfo
