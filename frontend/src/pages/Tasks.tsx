@@ -757,8 +757,8 @@ const canCurrentUserReview =
                     TASK HEADER
                 ================================================== */}
 
-                <div className="flex justify-between gap-3">
-
+                
+                  <div className="flex items-start justify-between gap-4">
                   <div>
 
                     <div className="text-xs font-bold text-orange">
@@ -778,7 +778,7 @@ const canCurrentUserReview =
 </p> 
                   </div>
 
-                  <div className="flex items-start justify-end gap-2">
+                  <div className="flex shrink-0 items-start gap-4">
 
                     <span
                       className={`badge h-fit ${
@@ -805,7 +805,8 @@ const canCurrentUserReview =
                     )}
 
                     <button
-                      className="btn !px-3 !py-1.5"
+                     <button
+  className="btn !px-3 !py-1.5 whitespace-nowrap" 
                       onClick={() => void toggleReviewHistory(t)}
                       disabled={
                         historyLoadingId === Number(t.id)
@@ -830,7 +831,8 @@ const canCurrentUserReview =
                         </button>
 
                         <button
-                          className="btn !px-3 !py-1.5 text-red-600"
+                          <button
+  className="btn !px-3 !py-1.5 whitespace-nowrap text-red-600"
                           onClick={() =>
                             remove(t.id)
                           }
@@ -2120,7 +2122,7 @@ const canCurrentUserReview =
                   {reviewTask.title}
                 </h3>
 
-                <p className="mt-1 text-sm muted">
+               <p className="mt-1 text-sm leading-5 muted">
                   Employee:{' '}
                   {reviewTask.assignee_name}
                 </p>
