@@ -1032,14 +1032,14 @@ const canCurrentUserReview =
 
                       {/* TEAM LEAD */}
 
-                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="grid grid-cols-[100px_1fr] items-center gap-3" >
 
-                        <span className="text-sm font-semibold">
+                        <span className="text-[13px] font-semibold leading-5">
                           Team Lead
                         </span>
 
                         <span
-                          className={`text-sm font-semibold ${reviewColor(
+                          className={`text-[13px] font-semibold leading-5 ${reviewColor(
                             t.lead_review_decision
                           )}`}
                         >
@@ -1053,14 +1053,14 @@ const canCurrentUserReview =
 
                       {/* ADMIN */}
 
-                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="grid grid-cols-[100px_1fr] items-center gap-3" >
 
-                        <span className="text-sm font-semibold">
+                        <span className="text-[13px] font-semibold leading-5">
                           Admin
                         </span>
 
                         <span
-                          className={`text-sm font-semibold ${reviewColor(
+                          className={`text-[13px] font-semibold leading-5 ${reviewColor(
                             t.admin_review_decision
                           )}`}
                         >
@@ -1074,14 +1074,14 @@ const canCurrentUserReview =
 
                       {/* SUPER ADMIN */}
 
-                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="grid grid-cols-[100px_1fr] items-center gap-3">
 
-                        <span className="text-sm font-semibold">
+                        <span className="text-[13px] font-semibold leading-5">
                           Super Admin
                         </span>
 
                         <span
-                          className={`text-sm font-semibold ${reviewColor(
+                          className={`text-[13px] font-semibold leading-5 ${reviewColor(
                             t.super_admin_review_decision
                           )}`}
                         >
