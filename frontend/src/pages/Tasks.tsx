@@ -766,20 +766,19 @@ const canCurrentUserReview =
                       {t.employee_code}
                     </div>
 
-                    <h3 className="font-extrabold text-navy">
-                      {t.title}
-                    </h3>
+                    <h3 className="mt-0.5 text-[18px] font-extrabold leading-6 text-navy">
+  {t.title}
+</h3>
 
-                    <p className="mt-1 text-sm muted">
-                      Assigned to{' '}
-                      {t.assignee_name} •{' '}
-                      {t.department_name ||
-                        'No department'}
-                    </p>
-
+                   <p className="mt-1 text-sm leading-5 muted">
+  Assigned to{' '}
+  {t.assignee_name} •{' '}
+  {t.department_name ||
+    'No department'}
+</p> 
                   </div>
 
-                  <div className="flex items-start gap-2">
+                  <div className="flex items-start justify-end gap-2">
 
                     <span
                       className={`badge h-fit ${
@@ -849,31 +848,31 @@ const canCurrentUserReview =
                     DESCRIPTION
                 ================================================== */}
 
-                <p className="mt-4 text-sm">
-                  {t.description ||
-                    'No description'}
-                </p>
+                <p className="mt-4 text-sm leading-6 text-slate-700">
+  {t.description ||
+    'No description'}
+</p>
 
                 {/* =================================================
                     TASK DETAILS
                 ================================================== */}
 
-                <div className="mt-4 grid gap-2 text-xs sm:grid-cols-2">
+                <div className="mt-4 grid grid-cols-1 gap-x-8 gap-y-2.5 text-sm sm:grid-cols-2">
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Uploaded By:</b>{' '}
                     {t.creator_name ||
                       'System'}
                   </div>
 
-                  <div>
+                 <div className="min-w-0 leading-5">
                     <b>Created:</b>{' '}
                     {new Date(
                       t.created_at
                     ).toLocaleString()}
                   </div>
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Start:</b>{' '}
                     {t.start_date
                       ? new Date(
@@ -882,7 +881,7 @@ const canCurrentUserReview =
                       : '—'}
                   </div>
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Deadline:</b>{' '}
                     {t.due_date
                       ? new Date(
@@ -891,17 +890,17 @@ const canCurrentUserReview =
                       : '—'}
                   </div>
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Scope:</b>{' '}
                     {t.assignment_scope}
                   </div>
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Priority:</b>{' '}
                     {t.priority}
                   </div>
 
-                  <div>
+                  <div className="min-w-0 leading-5">
                     <b>Type:</b>{' '}
                     {t.task_type ===
                     'NON_TECHNICAL'
@@ -910,7 +909,7 @@ const canCurrentUserReview =
                   </div>
 
 {t.display_status === 'REJECTED' ? (
-  <div>
+  <div className="min-w-0 leading-5">
     <b>Final Verification:</b>{' '}
     <span>Rejected</span>
   </div>
@@ -950,7 +949,7 @@ const canCurrentUserReview =
                     PROGRESS
                 ================================================== */}
 
-                <div className="mt-4 flex items-center justify-between text-xs">
+               <div className="mt-4 flex items-center justify-between text-sm"> 
 
                   <span className="font-semibold">
                     Progress
