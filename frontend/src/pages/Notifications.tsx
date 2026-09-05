@@ -141,7 +141,7 @@ export default function Notifications() {
       {/* Notification Summary */}
       {!pageErr && rows.length > 0 && (
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
-          <div className="text-sm muted">
+          <div className="text-base font-medium muted">
             {unreadCount > 0 ? (
               <>
                 You have{' '}
@@ -154,7 +154,7 @@ export default function Notifications() {
             )}
           </div>
 
-          <div className="text-xs muted">
+          <div className="text-sm font-medium muted">
             {rows.length} notification{rows.length !== 1 ? 's' : ''}
           </div>
         </div>
@@ -192,15 +192,15 @@ export default function Notifications() {
                     {/* Type + unread */}
                     <div className="mb-2 flex flex-wrap items-center gap-2">
                       <span
-                        className={`rounded-full px-2.5 py-1 text-[10px] font-extrabold tracking-wide ${getTypeStyle(
-                          type
-                        )}`}
+                       className={`rounded-full px-3 py-1.5 text-xs font-extrabold tracking-wide ${getTypeStyle(
+  type
+)}`} 
                       >
                         {type}
                       </span>
 
                       {!n.is_read && (
-                        <span className="flex items-center gap-1 text-xs font-bold text-orange">
+                        <span className="flex items-center gap-1.5 text-sm font-bold text-orange">
                           <span className="h-2 w-2 rounded-full bg-orange" />
                           New
                         </span>
@@ -208,7 +208,7 @@ export default function Notifications() {
                     </div>
 
                     {/* Title */}
-                    <div className="text-base font-extrabold leading-6 text-slate-900">
+                    <div className="text-lg font-extrabold leading-7 text-slate-900">
                       {n.title}
                     </div>
 
@@ -235,7 +235,7 @@ export default function Notifications() {
                     <div className="flex shrink-0 items-center gap-2">
                       <button
                         type="button"
-                        className="btn !px-3 !py-1.5 text-xs"
+                        className="btn !px-4 !py-2 text-sm font-semibold"
                         onClick={() => setEditing(n)}
                       >
                         Edit
