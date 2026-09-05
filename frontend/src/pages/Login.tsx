@@ -35,31 +35,27 @@ export default function Login() {
         <div className="w-full max-w-xl">
 
           {/* LOGO + WELCOME TEXT */}
-          <div className="mb-14 flex items-center gap-6">
+<div className="mb-14 flex items-center gap-6">
 
-            <img
-              src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
+  <img
+    src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
+    alt="WITHX Logo"
+    className="h-24 w-24 shrink-0 object-contain"
+  />
 
-  alt="WITHX Logo"
+  <div>
+    <h1 className="text-4xl font-extrabold tracking-tight text-navy md:text-5xl">
+      Welcome back
+    </h1>
 
-/>"
-              alt="WITHX Logo"
-              className="h-24 w-24 shrink-0 object-contain"
-            />
+    <p className="mt-3 text-base text-slate-500 md:text-lg">
+      Sign in to the WITHX Management Platform.
+    </p>
 
-            <div>
-              <h1 className="text-4xl font-extrabold tracking-tight text-navy md:text-5xl">
-                Welcome back
-              </h1>
+    <div className="mt-6 h-1 w-16 bg-orange" />
+  </div>
 
-              <p className="mt-3 text-base text-slate-500 md:text-lg">
-                Sign in to the WITHX Management Platform.
-              </p>
-
-              <div className="mt-6 h-1 w-16 bg-orange" />
-            </div>
-
-          </div>
+</div>
 
           {/* LOGIN FORM */}
           <form onSubmit={submit} className="space-y-7">
