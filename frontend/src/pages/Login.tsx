@@ -38,9 +38,7 @@ export default function Login() {
           <div className="mb-14 flex items-center gap-6">
 
             <img
-              src="<img
-
-  src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
+              src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
 
   alt="WITHX Logo"
 
