@@ -11,7 +11,9 @@ export default function Login() {
   const [err, setErr] = useState('');
   const [busy, setBusy] = useState(false);
 
-  if (user) return <Navigate to="/" replace />;
+  if (user) {
+    return <Navigate to="/" replace />;
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -31,31 +33,32 @@ export default function Login() {
     <div className="min-h-screen bg-white md:grid md:grid-cols-2">
 
       {/* LEFT SIDE - LOGIN */}
-      <div className="flex items-center justify-center bg-white p-8 md:p-12 lg:p-16">
+      <div className="flex justify-center bg-white px-8 pt-24 md:px-12 md:pt-32 lg:px-16">
+
         <div className="w-full max-w-xl">
 
           {/* LOGO + WELCOME TEXT */}
-<div className="mb-14 flex items-center gap-6">
+          <div className="mb-14 flex items-center gap-6">
 
-  <img
-    src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
-    alt="WITHX Logo"
-    className="h-24 w-24 shrink-0 object-contain"
-  />
+            <img
+              src="https://i.postimg.cc/qv56bkt6/withx-circular-logo.png"
+              alt="WITHX Logo"
+              className="h-24 w-24 shrink-0 object-contain"
+            />
 
-  <div>
-    <h1 className="text-4xl font-extrabold tracking-tight text-navy md:text-5xl">
-      Welcome back
-    </h1>
+            <div>
+              <h1 className="text-4xl font-extrabold tracking-tight text-navy md:text-5xl">
+                Welcome back
+              </h1>
 
-    <p className="mt-3 text-base text-slate-500 md:text-lg">
-      Sign in to the WITHX Management Platform.
-    </p>
+              <p className="mt-3 text-base text-slate-500 md:text-lg">
+                Sign in to the WITHX Management Platform.
+              </p>
 
-    <div className="mt-6 h-1 w-16 bg-orange" />
-  </div>
+              <div className="mt-6 h-1 w-16 bg-orange" />
+            </div>
 
-</div>
+          </div>
 
           {/* LOGIN FORM */}
           <form onSubmit={submit} className="space-y-7">
@@ -101,6 +104,7 @@ export default function Login() {
 
             {/* SIGN IN BUTTON */}
             <button
+              type="submit"
               className="btn btn-primary w-full"
               disabled={busy}
             >
@@ -119,6 +123,7 @@ export default function Login() {
 
       {/* RIGHT SIDE */}
       <div className="hidden items-center justify-center bg-navy p-12 text-white md:flex">
+
         <div className="max-w-lg">
 
           <div className="text-sm font-bold uppercase tracking-[.2em] text-orange">
@@ -135,6 +140,7 @@ export default function Login() {
           </p>
 
         </div>
+
       </div>
 
     </div>
