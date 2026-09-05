@@ -2661,46 +2661,141 @@ export async function updateLeaveRequest(req: Request, res: Response) { const id
 export async function deleteLeave(req: Request, res: Response) { const id = Number(req.params.id); const r = await query<any>('DELETE FROM leave_requests WHERE id=$1 RETURNING id', [id]); if (!r.rows[0]) return res.status(404).json({ message: 'Leave request not found' }); await audit(req.user?.userId, 'DELETE', 'LEAVE', id); res.json({ ok: true }); }
 
 export async function performance(req: Request, res: Response) {
-  let target = Number(req.query.employeeId || req.user!.employeeId);
-  if (req.user!.role === 'EMPLOYEE') target = req.user!.employeeId!;
-  if (!target) return res.status(400).json({ message: 'employeeId required' });
-  if (req.user!.role === 'TEAM_LEAD' && !(await requireTeamAuthority(req, target))) return res.status(403).json({ message: 'This employee is outside your team.' });
+  const requestedEmployeeId = Number(req.query.employeeId || 0);
+  let targets: number[] = [];
+
+  if (req.user!.role === 'EMPLOYEE') {
+    targets = [req.user!.employeeId!];
+  } else if (requestedEmployeeId) {
+    if (req.user!.role === 'TEAM_LEAD' && !(await requireTeamAuthority(req, requestedEmployeeId))) {
+      return res.status(403).json({ message: 'This employee is outside your team.' });
+    }
+    targets = [requestedEmployeeId];
+  } else if (req.user!.role === 'TEAM_LEAD') {
+    const team = await query<any>('SELECT id FROM employees WHERE team_lead_id=$1 AND status <> \'INACTIVE\'', [req.user!.employeeId]);
+    targets = team.rows.map((row: any) => Number(row.id));
+  } else {
+    const employees = await query<any>('SELECT id FROM employees WHERE status <> \'INACTIVE\'');
+    targets = employees.rows.map((row: any) => Number(row.id));
+  }
+
+  targets = targets.filter(Number.isFinite);
+  if (!targets.length) return res.status(400).json({ message: 'No employees available for performance calculation.' });
+
+  const safeNumber = (value: any, fallback = 0) => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : fallback;
+  };
 
   const setting = await query<any>(`SELECT value FROM system_settings WHERE key='minimum_work_minutes'`);
-  const minimumWorkMinutes = Math.max(1, Number(setting.rows[0]?.value || 180));
+  const configuredMinutes = safeNumber(setting.rows[0]?.value, 180);
+  const minimumWorkMinutes = Math.max(1, configuredMinutes);
   const minimumWorkHours = minimumWorkMinutes / 60;
 
-  const { rows } = await query<any>(`
-    WITH task AS (
-      SELECT count(*) task_total,
-             count(*) FILTER(WHERE status='COMPLETED') task_completed,
-             count(*) FILTER(WHERE status='COMPLETED' AND (due_date IS NULL OR completed_at<=due_date)) task_ontime
-      FROM tasks WHERE assigned_to=$1
-    ), att AS (
-      SELECT count(*) attendance_total,
-             count(*) FILTER(WHERE status IN('PRESENT','LATE')) attended,
-             avg(LEAST(COALESCE(total_hours,0) / $2::numeric, 1.0))
-               FILTER(WHERE status IN('PRESENT','LATE') AND check_in IS NOT NULL AND check_out IS NOT NULL) work_ratio
-      FROM attendance
-      WHERE employee_id=$1 AND work_date>=current_date-interval '30 days'
-    )
-    SELECT * FROM task,att`, [target, minimumWorkHours]);
+  const calculated: any[] = [];
+  for (const target of targets) {
+    const { rows } = await query<any>(`
+      WITH task AS (
+        SELECT count(*) FILTER(WHERE status <> 'CANCELLED') task_total,
+               count(*) FILTER(WHERE status='COMPLETED') task_completed,
+               count(*) FILTER(
+                 WHERE status='COMPLETED'
+                   AND (due_date IS NULL OR completed_at<=due_date)
+               ) task_ontime
+        FROM tasks
+        WHERE assigned_to=$1
+          AND created_at::date >= current_date - interval '29 days'
+      ), att AS (
+        SELECT count(*) attendance_total,
+               count(*) FILTER(WHERE status IN('PRESENT','LATE')) attended,
+               avg(LEAST(COALESCE(total_hours,0) / $2::numeric, 1.0))
+                 FILTER(WHERE status IN('PRESENT','LATE')) work_ratio
+        FROM attendance
+        WHERE employee_id=$1
+          AND work_date >= current_date - interval '29 days'
+          AND status <> 'LEAVE'
+      )
+      SELECT * FROM task,att`, [target, minimumWorkHours]);
 
-  const x = rows[0];
-  const taskCompletion = x.task_total ? Number(x.task_completed) / Number(x.task_total) * 100 : 100;
-  const onTime = x.task_completed ? Number(x.task_ontime) / Number(x.task_completed) * 100 : 100;
-  const attendance = x.attendance_total ? Number(x.attended) / Number(x.attendance_total) * 100 : 100;
-  const workingHours = Math.max(0, Math.min(100, Number(x.work_ratio || 0) * 100));
-  const score = .35 * taskCompletion + .25 * onTime + .20 * attendance + .20 * workingHours;
-  const start = new Date(); start.setDate(start.getDate() - 30);
+    const x = rows[0] || {};
+    const taskTotal = safeNumber(x.task_total);
+    const taskCompleted = safeNumber(x.task_completed);
+    const taskOntime = safeNumber(x.task_ontime);
+    const attendanceTotal = safeNumber(x.attendance_total);
+    const attended = safeNumber(x.attended);
+    const workRatio = safeNumber(x.work_ratio);
+
+    const taskCompletion = taskTotal > 0 ? (taskCompleted / taskTotal) * 100 : 100;
+    const onTime = taskCompleted > 0 ? (taskOntime / taskCompleted) * 100 : 100;
+    const attendance = attendanceTotal > 0 ? (attended / attendanceTotal) * 100 : 100;
+    const workingHours = Math.max(0, Math.min(100, workRatio * 100));
+
+    const rawScore =
+      (taskCompletion * 0.35) +
+      (onTime * 0.25) +
+      (attendance * 0.20) +
+      (workingHours * 0.20);
+
+    const score = Number.isFinite(rawScore)
+      ? Math.max(0, Math.min(100, rawScore))
+      : 0;
+
+    const start = new Date();
+    start.setDate(start.getDate() - 29);
+
+    const r = await query<any>(`
+      INSERT INTO performance_scores(employee_id,period_start,period_end,task_completion,on_time,attendance,punctuality,report_consistency,working_hours,score)
+      VALUES($1,$2,current_date,$3,$4,$5,0,0,$6,$7) RETURNING *`,
+      [
+        target,
+        start.toISOString().slice(0, 10),
+        Math.max(0, Math.min(100, safeNumber(taskCompletion, 100))),
+        Math.max(0, Math.min(100, safeNumber(onTime, 100))),
+        Math.max(0, Math.min(100, safeNumber(attendance, 100))),
+        workingHours,
+        score,
+      ]);
+
+    calculated.push(r.rows[0]);
+  }
+
+  res.json(
+    requestedEmployeeId || req.user!.role === 'EMPLOYEE'
+      ? calculated[0]
+      : { count: calculated.length, scores: calculated }
+  );
+}
+
+export async function performanceList(req: Request, res: Response) {
+  const p: any[] = [];
+  let w = 'WHERE 1=1';
+  if (req.user!.role === 'EMPLOYEE') {
+    p.push(req.user!.employeeId);
+    w += ` AND p.employee_id=$${p.length}`;
+  } else if (req.user!.role === 'TEAM_LEAD') {
+    p.push(req.user!.employeeId);
+    w += ` AND e.team_lead_id=$${p.length}`;
+  }
 
   const r = await query<any>(`
-    INSERT INTO performance_scores(employee_id,period_start,period_end,task_completion,on_time,attendance,punctuality,report_consistency,working_hours,score)
-    VALUES($1,$2,current_date,$3,$4,$5,0,0,$6,$7) RETURNING *`,
-    [target, start.toISOString().slice(0, 10), taskCompletion, onTime, attendance, workingHours, score]);
-  res.json(r.rows[0]);
+    SELECT DISTINCT ON(p.employee_id)
+      p.*,
+      e.employee_code,
+      e.user_type,
+      e.first_name||' '||e.last_name employee_name,
+      d.name department_name,
+      CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score, 0) END::numeric AS safe_score
+    FROM performance_scores p
+    JOIN employees e ON e.id=p.employee_id
+    LEFT JOIN departments d ON d.id=e.department_id
+    ${w}
+    ORDER BY p.employee_id,p.period_end DESC,p.created_at DESC`, p);
+
+  res.json(r.rows.map((row: any) => ({
+    ...row,
+    score: Number.isFinite(Number(row.safe_score)) ? Math.max(0, Math.min(100, Number(row.safe_score))) : 0,
+  })));
 }
-export async function performanceList(req: Request, res: Response) { const p: any[] = []; let w = 'WHERE 1=1'; if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND p.employee_id=$${p.length}`; } else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND e.team_lead_id=$${p.length}`; } const r = await query<any>(`SELECT DISTINCT ON(p.employee_id) p.*,e.employee_code,e.user_type,e.first_name||' '||e.last_name employee_name,d.name department_name FROM performance_scores p JOIN employees e ON e.id=p.employee_id LEFT JOIN departments d ON d.id=e.department_id ${w} ORDER BY p.employee_id,p.period_end DESC`, p); res.json(r.rows); }
 
 export async function notifications(req: Request, res: Response) {
   await syncDeadlineNotifications(req.user!.role === 'SUPER_ADMIN' ? null : req.user!.employeeId);
@@ -2735,7 +2830,7 @@ export async function analytics(req: Request, res: Response) {
     team ? query<any>(`SELECT d.name,count(e.id)::int employees FROM departments d JOIN employees e ON e.department_id=d.id WHERE e.team_lead_id=$1 GROUP BY d.id,d.name ORDER BY d.name`, [emp]) : query<any>(`SELECT d.name,count(e.id)::int employees FROM departments d LEFT JOIN employees e ON e.department_id=d.id GROUP BY d.id,d.name ORDER BY d.name`),
     team ? query<any>(`SELECT t.status,count(*)::int count FROM tasks t JOIN employees e ON e.id=t.assigned_to WHERE e.team_lead_id=$1 GROUP BY t.status ORDER BY t.status`, [emp]) : query<any>(`SELECT status,count(*)::int count FROM tasks GROUP BY status ORDER BY status`),
     team ? query<any>(`SELECT a.work_date,count(*) FILTER(WHERE a.status IN('PRESENT','LATE'))::int present,count(*)::int total FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE e.team_lead_id=$1 AND a.work_date>=current_date-interval '6 days' GROUP BY a.work_date ORDER BY a.work_date`, [emp]) : query<any>(`SELECT work_date,count(*) FILTER(WHERE status IN('PRESENT','LATE'))::int present,count(*)::int total FROM attendance WHERE work_date>=current_date-interval '6 days' GROUP BY work_date ORDER BY work_date`),
-    team ? query<any>(`SELECT e.first_name||' '||e.last_name employee_name,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id WHERE e.team_lead_id=$1 AND p.id IN(SELECT DISTINCT ON(employee_id) id FROM performance_scores ORDER BY employee_id,period_end DESC) ORDER BY p.score DESC LIMIT 10`, [emp]) : query<any>(`SELECT e.first_name||' '||e.last_name employee_name,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id WHERE p.id IN(SELECT DISTINCT ON(employee_id) id FROM performance_scores ORDER BY employee_id,period_end DESC) ORDER BY p.score DESC LIMIT 10`)
+    team ? query<any>(`SELECT e.first_name||' '||e.last_name employee_name,CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END::numeric AS score FROM performance_scores p JOIN employees e ON e.id=p.employee_id WHERE e.team_lead_id=$1 AND p.id IN(SELECT DISTINCT ON(employee_id) id FROM performance_scores ORDER BY employee_id,period_end DESC,created_at DESC) ORDER BY CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END DESC LIMIT 10`, [emp]) : query<any>(`SELECT e.first_name||' '||e.last_name employee_name,CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END::numeric AS score FROM performance_scores p JOIN employees e ON e.id=p.employee_id WHERE p.id IN(SELECT DISTINCT ON(employee_id) id FROM performance_scores ORDER BY employee_id,period_end DESC,created_at DESC) ORDER BY CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END DESC LIMIT 10`)
   ]); res.json({ departments: dept.rows, tasks: task.rows, attendance: attendance.rows, performance: performance.rows });
 }
 
