@@ -805,8 +805,7 @@ const canCurrentUserReview =
                     )}
 
                     <button
-                     <button
-  className="btn !px-3 !py-1.5 whitespace-nowrap" 
+                      className="btn !px-3 !py-1.5 whitespace-nowrap" 
                       onClick={() => void toggleReviewHistory(t)}
                       disabled={
                         historyLoadingId === Number(t.id)
@@ -831,8 +830,7 @@ const canCurrentUserReview =
                         </button>
 
                         <button
-                          <button
-  className="btn !px-3 !py-1.5 whitespace-nowrap text-red-600"
+                          className="btn !px-3 !py-1.5 whitespace-nowrap text-red-600"
                           onClick={() =>
                             remove(t.id)
                           }
