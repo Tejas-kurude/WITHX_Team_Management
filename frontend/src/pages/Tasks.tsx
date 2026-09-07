@@ -443,6 +443,40 @@ async function toggleReviewHistory(task: any) {
     }
   }
 
+  function priorityClass(
+    priority: string | null | undefined
+  ) {
+    switch (String(priority || '').toUpperCase()) {
+      case 'LOW':
+        return 'bg-green-100 text-green-800 border border-green-300';
+      case 'MEDIUM':
+        return 'bg-yellow-100 text-yellow-800 border border-yellow-300';
+      case 'HIGH':
+        return 'bg-orange-100 text-orange-800 border border-orange-300';
+      case 'CRITICAL':
+        return 'bg-red-100 text-red-800 border border-red-300';
+      default:
+        return 'bg-slate-100 text-slate-700 border border-slate-300';
+    }
+  }
+
+  function priorityLabel(
+    priority: string | null | undefined
+  ) {
+    switch (String(priority || '').toUpperCase()) {
+      case 'LOW':
+        return 'Routine';
+      case 'MEDIUM':
+        return 'Standard';
+      case 'HIGH':
+        return 'High Priority';
+      case 'CRITICAL':
+        return 'Urgent';
+      default:
+        return 'Standard';
+    }
+  }
+
   const teamLeads = emps.filter(
     (e) => e.role === 'TEAM_LEAD'
   );
@@ -758,91 +792,90 @@ const canCurrentUserReview =
                 ================================================== */}
 
                 
-                  <div className="flex items-start justify-between gap-4">
-                  <div>
+                  <div className="space-y-4">
 
-                    <div className="text-xs font-bold text-orange">
-                      TASK #{t.id} •{' '}
-                      {t.employee_code}
-                    </div>
+                    {/* TOP ROW — STATUS + ACTION BUTTONS */}
+                    <div className="flex flex-wrap items-center justify-between gap-3">
 
-                    <h3 className="mt-0.5 text-[18px] font-extrabold leading-6 text-navy">
-  {t.title}
-</h3>
-
-                   <p className="mt-1 text-sm leading-5 muted">
-  Assigned to{' '}
-  {t.assignee_name} •{' '}
-  {t.department_name ||
-    'No department'}
-</p> 
-                  </div>
-
-                  <div className="flex shrink-0 items-start gap-4">
-
-                    <span
-                      className={`badge h-fit ${
-                        t.display_status ===
-                        'OVERDUE'
-                          ? '!bg-red-100 !text-red-700'
-                          : ''
-                      }`}
-                    >
-                      {t.display_status}
-                    </span>
-
-                    {isAssignedEmployee && isNeedsChanges && (
-                      <button
-                        className="btn btn-accent !px-3 !py-1.5"
-                        onClick={() => {
-                          setEditing(t);
-                          setErr('');
-                          setShow(true);
-                        }}
+                      <span
+                        className={`badge h-fit ${
+                          t.display_status === 'OVERDUE'
+                            ? '!bg-red-100 !text-red-700'
+                            : ''
+                        }`}
                       >
-                        Edit Task
-                      </button>
-                    )}
+                        {t.display_status}
+                      </span>
 
-                    <button
-                      className="btn !px-3 !py-1.5 whitespace-nowrap" 
-                      onClick={() => void toggleReviewHistory(t)}
-                      disabled={
-                        historyLoadingId === Number(t.id)
-                      }
-                    >
-                      {historyLoadingId === Number(t.id)
-                        ? 'Loading...'
-                        : 'Task History'}
-                    </button>
+                      <div className="flex flex-wrap items-center gap-2">
 
-                    {isSuper && (
-                      <>
-                        <button
-                          className="btn !px-3 !py-1.5"
-                          onClick={() => {
-                            setEditing(t);
-                            setErr('');
-                            setShow(true);
-                          }}
-                        >
-                          Edit
-                        </button>
+                        {isAssignedEmployee && isNeedsChanges && (
+                          <button
+                            className="btn !bg-slate-600/15 !text-slate-700 !border !border-slate-300 hover:!bg-slate-600/25 !px-3 !py-1.5 whitespace-nowrap"
+                            onClick={() => {
+                              setEditing(t);
+                              setErr('');
+                              setShow(true);
+                            }}
+                          >
+                            Edit Task
+                          </button>
+                        )}
 
                         <button
-                          className="btn !px-3 !py-1.5 whitespace-nowrap text-red-600"
-                          onClick={() =>
-                            remove(t.id)
+                          className="btn !bg-slate-700/15 !text-slate-800 !border !border-slate-300 hover:!bg-slate-700/25 !px-3 !py-1.5 whitespace-nowrap"
+                          onClick={() => void toggleReviewHistory(t)}
+                          disabled={
+                            historyLoadingId === Number(t.id)
                           }
                         >
-                          Delete
+                          {historyLoadingId === Number(t.id)
+                            ? 'Loading...'
+                            : 'Task History'}
                         </button>
-                      </>
-                    )}
+
+                        {isSuper && (
+                          <>
+                            <button
+                              className="btn !bg-sky-700/15 !text-sky-800 !border !border-sky-300 hover:!bg-sky-700/25 !px-3 !py-1.5"
+                              onClick={() => {
+                                setEditing(t);
+                                setErr('');
+                                setShow(true);
+                              }}
+                            >
+                              Edit
+                            </button>
+
+                            <button
+                              className="btn !bg-rose-700/15 !text-rose-800 !border !border-rose-300 hover:!bg-rose-700/25 !px-3 !py-1.5 whitespace-nowrap"
+                              onClick={() => remove(t.id)}
+                            >
+                              Delete
+                            </button>
+                          </>
+                        )}
+
+                      </div>
+                    </div>
+
+                    {/* TASK ID + TITLE + ASSIGNEE BELOW BUTTONS */}
+                    <div>
+                      <div className="text-xs font-bold text-orange">
+                        TASK #{t.id} • {t.employee_code}
+                      </div>
+
+                      <h3 className="mt-0.5 text-[18px] font-extrabold leading-6 text-navy">
+                        {t.title}
+                      </h3>
+
+                      <p className="mt-1 text-sm leading-5 muted">
+                        Assigned to {t.assignee_name} •{' '}
+                        {t.department_name || 'No department'}
+                      </p>
+                    </div>
 
                   </div>
-
-                </div>
 
                 {/* =================================================
                     DESCRIPTION
@@ -896,8 +929,16 @@ const canCurrentUserReview =
                   </div>
 
                   <div className="min-w-0 leading-5">
-                    <b>Priority:</b>{' '}
-                    {t.priority}
+                    <div className="flex items-center gap-2">
+                      <b>Priority:</b>
+                      <span
+                        className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ${priorityClass(
+                          t.priority
+                        )}`}
+                      >
+                        {priorityLabel(t.priority)}
+                      </span>
+                    </div>
                   </div>
 
                   <div className="min-w-0 leading-5">
@@ -1851,46 +1892,64 @@ const canCurrentUserReview =
             {user?.role !== 'EMPLOYEE' && (
               <div className="grid gap-4 sm:grid-cols-2">
 
-              <select
-                name="priority"
-                className="input"
-                defaultValue={
-                  editing?.priority ||
-                  'MEDIUM'
-                }
-              >
-                <option>LOW</option>
-                <option>MEDIUM</option>
-                <option>HIGH</option>
-                <option>CRITICAL</option>
-              </select>
+              <div>
+                <label className="label">
+                  Priority Level
+                </label>
 
-              <input
-                name="startDate"
-                className="input"
-                type="date"
-                defaultValue={
-                  editing?.start_date?.slice?.(
-                    0,
-                    10
-                  ) || ''
-                }
-              />
+                <select
+                  name="priority"
+                  className="input mt-1"
+                  defaultValue={
+                    editing?.priority ||
+                    'MEDIUM'
+                  }
+                >
+                  <option value="LOW">Routine</option>
+                  <option value="MEDIUM">Standard</option>
+                  <option value="HIGH">High Priority</option>
+                  <option value="CRITICAL">Urgent</option>
+                </select>
+              </div>
 
-              <input
-                name="dueDate"
-                className="input"
-                type="datetime-local"
-                defaultValue={
-                  editing?.due_date
-                    ? new Date(
-                        editing.due_date
-                      )
-                        .toISOString()
-                        .slice(0, 16)
-                    : ''
-                }
-              />
+              <div>
+                <label className="label">
+                  Start Date
+                </label>
+
+                <input
+                  name="startDate"
+                  className="input mt-1"
+                  type="date"
+                  defaultValue={
+                    editing?.start_date?.slice?.(
+                      0,
+                      10
+                    ) || ''
+                  }
+                />
+              </div>
+
+              <div>
+                <label className="label">
+                  End Date
+                </label>
+
+                <input
+                  name="dueDate"
+                  className="input mt-1"
+                  type="datetime-local"
+                  defaultValue={
+                    editing?.due_date
+                      ? new Date(
+                          editing.due_date
+                        )
+                          .toISOString()
+                          .slice(0, 16)
+                      : ''
+                  }
+                />
+              </div>
 
               <input
                 name="attachmentUrl"
