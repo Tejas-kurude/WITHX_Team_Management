@@ -31,6 +31,8 @@ export default function Tasks() {
 
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
+  const [deleteTask, setDeleteTask] = useState<any | null>(null);
+const [deleting, setDeleting] = useState(false);
 
   const [showSubmit, setShowSubmit] = useState(false);
   const [submitTask, setSubmitTask] = useState<any | null>(null);
@@ -377,16 +379,24 @@ async function toggleReviewHistory(task: any) {
      DELETE TASK
   ========================================================= */
 
-  async function remove(id: number) {
-    if (!confirm('Delete this task?')) return;
+  async function remove() {
+  if (!deleteTask) return;
 
-    try {
-      await api.delete(`/tasks/${id}`);
-      await load();
-    } catch (e) {
-      alert(messageOf(e));
-    }
+  try {
+    setDeleting(true);
+    setPageErr('');
+
+    await api.delete(`/tasks/${deleteTask.id}`);
+
+    setDeleteTask(null);
+
+    await load();
+  } catch (e) {
+    setPageErr(messageOf(e));
+  } finally {
+    setDeleting(false);
   }
+}
 
   /* =========================================================
      REVIEW DISPLAY HELPERS
@@ -847,12 +857,12 @@ const canCurrentUserReview =
                               Edit
                             </button>
 
-                            <button
-                              className="btn !bg-rose-700/15 !text-rose-800 !border !border-rose-300 hover:!bg-rose-700/25 !px-3 !py-1.5 whitespace-nowrap"
-                              onClick={() => remove(t.id)}
-                            >
-                              Delete
-                            </button>
+                           <button
+  className="btn !bg-rose-700/15 !text-rose-800 !border !border-rose-300 hover:!bg-rose-700/25 !px-3 !py-1.5 whitespace-nowrap"
+  onClick={() => setDeleteTask(t)}
+>
+  Delete
+</button>
                           </>
                         )}
 
@@ -2376,7 +2386,153 @@ const canCurrentUserReview =
 
           </Modal>
         )}
+{/* =========================================================
+    DELETE TASK CONFIRMATION MODAL
+========================================================= */}
 
+{deleteTask && (
+  <Modal
+    title="Delete Task?"
+    onClose={() => {
+      if (!deleting) {
+        setDeleteTask(null);
+      }
+    }}
+  >
+    <div className="space-y-5">
+
+      {/* Warning */}
+      <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+        <div className="flex items-start gap-3">
+
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-xl">
+            ⚠️
+          </div>
+
+          <div>
+            <h3 className="font-semibold text-red-800">
+              Are you sure you want to delete this task?
+            </h3>
+
+            <p className="mt-1 text-sm text-red-700">
+              This action cannot be undone.
+            </p>
+          </div>
+
+        </div>
+      </div>
+
+      {/* Task Information */}
+      <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+
+        <div className="text-xs font-bold text-orange">
+          TASK #{deleteTask.id}
+        </div>
+
+        <h3 className="mt-1 text-lg font-bold text-navy">
+          {deleteTask.title}
+        </h3>
+
+        {deleteTask.assignee_name && (
+          <div className="mt-1 text-sm muted">
+            Assigned to {deleteTask.assignee_name}
+          </div>
+        )}
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+
+          <div className="rounded-lg bg-white p-3">
+            <div className="text-xs muted">
+              Status
+            </div>
+
+            <div className="mt-1">
+              <span className="badge">
+                {deleteTask.display_status || deleteTask.status}
+              </span>
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-white p-3">
+            <div className="text-xs muted">
+              Progress
+            </div>
+
+            <div className="mt-1 font-semibold">
+              {Number(deleteTask.progress || 0)}%
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-white p-3">
+            <div className="text-xs muted">
+              Priority
+            </div>
+
+            <div className="mt-1 font-semibold">
+              {priorityLabel(deleteTask.priority)}
+            </div>
+          </div>
+
+          <div className="rounded-lg bg-white p-3">
+            <div className="text-xs muted">
+              Department
+            </div>
+
+            <div className="mt-1 font-semibold">
+              {deleteTask.department_name || 'No department'}
+            </div>
+          </div>
+
+        </div>
+
+        {deleteTask.description && (
+          <div className="mt-3 rounded-lg bg-white p-3">
+
+            <div className="text-xs muted">
+              Description
+            </div>
+
+            <div className="mt-1 whitespace-pre-wrap break-words text-sm">
+              {deleteTask.description}
+            </div>
+
+          </div>
+        )}
+
+      </div>
+
+      {/* Important Warning */}
+      <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+        Deleting this task may also remove its submissions,
+        review history and related task records.
+      </div>
+
+      {/* Buttons */}
+      <div className="flex justify-end gap-3">
+
+        <button
+          type="button"
+          className="btn"
+          disabled={deleting}
+          onClick={() => setDeleteTask(null)}
+        >
+          Cancel
+        </button>
+
+        <button
+          type="button"
+          className="btn bg-red-600 text-white hover:bg-red-700"
+          disabled={deleting}
+          onClick={() => void remove()}
+        >
+          {deleting ? 'Deleting...' : 'Delete Task'}
+        </button>
+
+      </div>
+
+    </div>
+  </Modal>
+)}
     </>
   );
 }
