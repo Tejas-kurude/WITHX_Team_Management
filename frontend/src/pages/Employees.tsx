@@ -1,8 +1,5 @@
 import { FormEvent, useEffect, useState } from 'react';
-<<<<<<< HEAD
-=======
 import { Eye, EyeOff } from 'lucide-react';
->>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
@@ -21,10 +18,7 @@ export default function Employees() {
 
   const [deleteUser, setDeleteUser] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
-<<<<<<< HEAD
-=======
   const [visiblePasswords, setVisiblePasswords] = useState<Record<number, boolean>>({});
->>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
 
   const [err, setErr] = useState('');
   const [pageErr, setPageErr] = useState('');
@@ -218,10 +212,7 @@ export default function Employees() {
                     <div className="text-xs muted">
                       {r.email}
                     </div>
-<<<<<<< HEAD
-=======
-
-                    {isSuper && (
+{isSuper && (
                       <div className="mt-1 flex items-center gap-1 text-xs">
                         <span className="muted">Password:</span>
                         <span className="font-mono">
@@ -252,7 +243,6 @@ export default function Employees() {
                         </button>
                       </div>
                     )}
->>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
                   </td>
 
                   <td>

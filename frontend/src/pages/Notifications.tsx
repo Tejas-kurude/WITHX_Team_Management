@@ -9,11 +9,8 @@ export default function Notifications() {
 
   const [rows, setRows] = useState<any[]>([]);
   const [editing, setEditing] = useState<any | null>(null);
-<<<<<<< HEAD
-=======
   const [selected, setSelected] = useState<any | null>(null);
   const [confirmClear, setConfirmClear] = useState(false);
->>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
 
   const [deleteNotification, setDeleteNotification] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -466,8 +463,6 @@ export default function Notifications() {
         </Modal>
       )}
 
-<<<<<<< HEAD
-=======
       {/* Notification Details Modal */}
       {selected && (
         <Modal
@@ -532,7 +527,6 @@ export default function Notifications() {
         </Modal>
       )}
 
->>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
       {/* Delete Notification Modal */}
       {deleteNotification && (
         <Modal
