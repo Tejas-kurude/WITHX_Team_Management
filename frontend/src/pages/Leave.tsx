@@ -13,6 +13,9 @@ export default function Leave() {
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
 
+  const [deleteLeave, setDeleteLeave] = useState<any | null>(null);
+  const [deleting, setDeleting] = useState(false);
+
   const [err, setErr] = useState('');
   const [pageErr, setPageErr] = useState('');
 
@@ -93,15 +96,22 @@ export default function Leave() {
     }
   }
 
-  async function remove(id: number) {
-    if (!confirm('Delete this leave request?')) return;
+  async function remove() {
+    if (!deleteLeave) return;
 
     try {
-      await api.delete(`/leave/${id}`);
+      setDeleting(true);
+      setPageErr('');
+
+      await api.delete(`/leave/${deleteLeave.id}`);
+
+      setDeleteLeave(null);
 
       await load();
     } catch (e) {
-      alert(messageOf(e));
+      setPageErr(messageOf(e));
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -124,12 +134,14 @@ export default function Leave() {
         }
       />
 
+      {/* Page Error */}
       {pageErr && (
         <div className="mb-4 rounded-xl bg-red-50 p-4 text-sm text-red-700">
           {pageErr}
         </div>
       )}
 
+      {/* Leave Table */}
       {rows.length ? (
         <div className="table-wrap">
           <table className="table">
@@ -155,7 +167,7 @@ export default function Leave() {
             </thead>
 
             <tbody>
-              {rows.map((r) => (
+              {rows.map(r => (
                 <tr key={r.id}>
                   {user?.role !== 'EMPLOYEE' && (
                     <td>
@@ -171,13 +183,17 @@ export default function Leave() {
                     </td>
                   )}
 
-                  <td>{r.leave_type}</td>
+                  <td>
+                    {r.leave_type}
+                  </td>
 
                   <td>
                     {new Date(
                       r.start_date
                     ).toLocaleDateString()}
+
                     {' – '}
+
                     {new Date(
                       r.end_date
                     ).toLocaleDateString()}
@@ -199,6 +215,7 @@ export default function Leave() {
                     <td>
                       {r.status === 'PENDING' ? (
                         <div className="flex gap-2">
+
                           <button
                             className="btn btn-accent !px-3 !py-1.5"
                             onClick={() => {
@@ -226,6 +243,7 @@ export default function Leave() {
                           >
                             Reject
                           </button>
+
                         </div>
                       ) : r.reviewed_by_name ? (
                         <div>
@@ -263,6 +281,7 @@ export default function Leave() {
                   {isSuper && (
                     <td>
                       <div className="flex gap-2">
+
                         <button
                           className="btn !px-3 !py-1.5"
                           onClick={() => {
@@ -276,12 +295,11 @@ export default function Leave() {
 
                         <button
                           className="btn !px-3 !py-1.5 text-red-600"
-                          onClick={() =>
-                            remove(r.id)
-                          }
+                          onClick={() => setDeleteLeave(r)}
                         >
                           Delete
                         </button>
+
                       </div>
                     </td>
                   )}
@@ -294,6 +312,7 @@ export default function Leave() {
         !pageErr && <Empty />
       )}
 
+      {/* Apply / Edit Leave Modal */}
       {show && (
         <Modal
           title={
@@ -332,6 +351,7 @@ export default function Leave() {
             </div>
 
             <div className="grid gap-4 sm:grid-cols-2">
+
               <div>
                 <label className="label">
                   From Date
@@ -369,6 +389,7 @@ export default function Leave() {
                   required
                 />
               </div>
+
             </div>
 
             <div>
@@ -388,23 +409,40 @@ export default function Leave() {
             </div>
 
             {err && (
-              <div className="text-red-600">
+              <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
                 {err}
               </div>
             )}
 
-            <button
-              type="submit"
-              className="btn btn-primary"
-            >
-              {editing
-                ? 'Save Changes'
-                : 'Submit Request'}
-            </button>
+            <div className="flex justify-end gap-2">
+
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+                  setShow(false);
+                  setEditing(null);
+                  setErr('');
+                }}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="submit"
+                className="btn btn-primary"
+              >
+                {editing
+                  ? 'Save Changes'
+                  : 'Submit Request'}
+              </button>
+
+            </div>
           </form>
         </Modal>
       )}
 
+      {/* Approve / Reject Modal */}
       {decision && (
         <Modal
           title={
@@ -419,6 +457,7 @@ export default function Leave() {
           }}
         >
           <div className="space-y-4">
+
             <div>
               <label className="label">
                 Comment{' '}
@@ -435,19 +474,20 @@ export default function Leave() {
                     : 'Add a reason for rejecting this leave...'
                 }
                 value={comment}
-                onChange={(e) =>
+                onChange={e =>
                   setComment(e.target.value)
                 }
               />
             </div>
 
             {err && (
-              <div className="text-red-600">
+              <div className="rounded-lg bg-red-50 p-3 text-sm text-red-700">
                 {err}
               </div>
             )}
 
             <div className="flex justify-end gap-3">
+
               <button
                 type="button"
                 className="btn"
@@ -471,10 +511,157 @@ export default function Leave() {
                   ? 'Approve Leave'
                   : 'Reject Leave'}
               </button>
+
             </div>
+
           </div>
         </Modal>
       )}
+
+      {/* Delete Leave Confirmation Modal */}
+      {deleteLeave && (
+        <Modal
+          title="Delete Leave Request?"
+          onClose={() => {
+            if (!deleting) {
+              setDeleteLeave(null);
+            }
+          }}
+        >
+          <div className="space-y-5">
+
+            {/* Warning */}
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+
+              <div className="flex items-start gap-3">
+
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-xl">
+                  ⚠️
+                </div>
+
+                <div>
+                  <h3 className="font-semibold text-red-800">
+                    Are you sure you want to delete this leave request?
+                  </h3>
+
+                  <p className="mt-1 text-sm text-red-700">
+                    This action cannot be undone.
+                  </p>
+                </div>
+
+              </div>
+
+            </div>
+
+            {/* Leave Details */}
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+
+              {deleteLeave.employee_name && (
+                <div className="font-semibold text-slate-900">
+                  {deleteLeave.employee_name}
+                </div>
+              )}
+
+              {deleteLeave.employee_code && (
+                <div className="mt-1 text-sm muted">
+                  {deleteLeave.employee_code}
+                </div>
+              )}
+
+              <div className="mt-4 grid gap-3 sm:grid-cols-2">
+
+                <div className="rounded-lg bg-white p-3">
+                  <div className="text-xs muted">
+                    Leave Type
+                  </div>
+
+                  <div className="mt-1 font-medium">
+                    {deleteLeave.leave_type}
+                  </div>
+                </div>
+
+                <div className="rounded-lg bg-white p-3">
+                  <div className="text-xs muted">
+                    Status
+                  </div>
+
+                  <div className="mt-1">
+                    <span className="badge">
+                      {deleteLeave.status}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="rounded-lg bg-white p-3 sm:col-span-2">
+                  <div className="text-xs muted">
+                    Leave Dates
+                  </div>
+
+                  <div className="mt-1 font-medium">
+                    {new Date(
+                      deleteLeave.start_date
+                    ).toLocaleDateString()}
+
+                    {' – '}
+
+                    {new Date(
+                      deleteLeave.end_date
+                    ).toLocaleDateString()}
+                  </div>
+                </div>
+
+              </div>
+
+              {deleteLeave.reason && (
+                <div className="mt-3 rounded-lg bg-white p-3">
+                  <div className="text-xs muted">
+                    Reason
+                  </div>
+
+                  <div className="mt-1 break-words text-sm">
+                    {deleteLeave.reason}
+                  </div>
+                </div>
+              )}
+
+            </div>
+
+            <p className="text-sm muted">
+              Deleting this request will permanently remove it from
+              the leave records.
+            </p>
+
+            {/* Buttons */}
+            <div className="flex justify-end gap-3">
+
+              <button
+                type="button"
+                className="btn"
+                disabled={deleting}
+                onClick={() =>
+                  setDeleteLeave(null)
+                }
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="btn bg-red-600 text-white hover:bg-red-700"
+                disabled={deleting}
+                onClick={() => void remove()}
+              >
+                {deleting
+                  ? 'Deleting...'
+                  : 'Delete Leave'}
+              </button>
+
+            </div>
+
+          </div>
+        </Modal>
+      )}
+
     </>
   );
 }
