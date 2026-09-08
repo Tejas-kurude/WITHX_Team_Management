@@ -1,4 +1,4 @@
-import { randomUUID } from 'crypto';
+import { randomUUID, createCipheriv, createDecipheriv, createHash, randomBytes } from 'crypto';
 import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import { Request, Response } from 'express';
@@ -11,6 +11,33 @@ const isAdmin = (role?: string) => ['SUPER_ADMIN', 'ADMIN'].includes(role || '')
 const isManager = (role?: string) => ['SUPER_ADMIN', 'ADMIN', 'TEAM_LEAD'].includes(role || '');
 const numOrNull = (v: any) => v === '' || v === undefined || v === null ? null : Number(v);
 const textOrNull = (v: any) => v === '' || v === undefined || v === null ? null : String(v);
+
+function passwordEncryptionKey() {
+  const raw = process.env.PASSWORD_ENCRYPTION_KEY || '';
+  if (!raw) throw new Error('PASSWORD_ENCRYPTION_KEY is not configured.');
+  return createHash('sha256').update(raw).digest();
+}
+
+function encryptPassword(password: string) {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv('aes-256-gcm', passwordEncryptionKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(password, 'utf8'), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return `${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted.toString('base64')}`;
+}
+
+function decryptPassword(payload: string | null | undefined) {
+  if (!payload) return null;
+  const [ivB64, tagB64, encryptedB64] = String(payload).split(':');
+  if (!ivB64 || !tagB64 || !encryptedB64) return null;
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', passwordEncryptionKey(), Buffer.from(ivB64, 'base64'));
+    decipher.setAuthTag(Buffer.from(tagB64, 'base64'));
+    return Buffer.concat([decipher.update(Buffer.from(encryptedB64, 'base64')), decipher.final()]).toString('utf8');
+  } catch {
+    return null;
+  }
+}
 
 async function isTeamMember(teamLeadId: number | null, employeeId: number) {
   if (!teamLeadId) return false;
@@ -150,8 +177,13 @@ export async function listEmployees(req: Request, res: Response) {
   if (userType) { p.push(userType); where += ` AND e.user_type=$${p.length}`; }
   if (role) { p.push(role); where += ` AND u.role=$${p.length}`; }
   if (teamLeadId && req.user!.role !== 'TEAM_LEAD') { p.push(Number(teamLeadId)); where += ` AND e.team_lead_id=$${p.length}`; }
-  const r = await query<any>(`SELECT e.*,d.name department_name,tl.first_name||' '||tl.last_name team_lead_name,u.role FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees tl ON tl.id=e.team_lead_id LEFT JOIN users u ON u.employee_id=e.id ${where} ORDER BY e.created_at DESC`, p);
-  res.json(r.rows);
+  const r = await query<any>(`SELECT e.*,d.name department_name,tl.first_name||' '||tl.last_name team_lead_name,u.role,u.password_encrypted FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees tl ON tl.id=e.team_lead_id LEFT JOIN users u ON u.employee_id=e.id ${where} ORDER BY e.created_at DESC`, p);
+  res.json(r.rows.map((row: any) => {
+    const { password_encrypted, ...safeRow } = row;
+    return req.user!.role === 'SUPER_ADMIN'
+      ? { ...safeRow, login_password: decryptPassword(password_encrypted) }
+      : safeRow;
+  }));
 }
 export async function getEmployee(req: Request, res: Response) {
   const id = Number(req.params.id);
@@ -173,7 +205,8 @@ export async function createEmployee(req: Request, res: Response) {
     const code = await nextUserCode(client, userType);
     const e = await client.query<any>(`INSERT INTO employees(employee_code,user_type,first_name,last_name,email,phone,job_title,department_id,joining_date,team_lead_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`, [code, userType, firstName, lastName, email, textOrNull(phone), textOrNull(jobTitle), numOrNull(departmentId), joiningDate || new Date().toISOString().slice(0, 10), numOrNull(teamLeadId)]);
     const hash = await bcrypt.hash(password, 12);
-    await client.query('INSERT INTO users(email,password_hash,role,employee_id) VALUES($1,$2,$3,$4)', [email, hash, role, e.rows[0].id]);
+    const encryptedPassword = encryptPassword(password);
+    await client.query('INSERT INTO users(email,password_hash,password_encrypted,role,employee_id) VALUES($1,$2,$3,$4,$5)', [email, hash, encryptedPassword, role, e.rows[0].id]);
     await client.query('COMMIT');
     await audit(req.user?.userId, 'CREATE', userType, e.rows[0].id, { code, email, role, departmentId, teamLeadId });
     res.status(201).json(e.rows[0]);
@@ -187,7 +220,17 @@ export async function updateEmployee(req: Request, res: Response) {
   const id = Number(req.params.id), b = req.body;
   const r = await query<any>(`UPDATE employees SET first_name=COALESCE($1,first_name),last_name=COALESCE($2,last_name),phone=$3,job_title=$4,department_id=$5,team_lead_id=$6,status=COALESCE($7,status),updated_at=now() WHERE id=$8 RETURNING *`, [b.firstName || null, b.lastName || null, textOrNull(b.phone), textOrNull(b.jobTitle), numOrNull(b.departmentId), numOrNull(b.teamLeadId), b.status || null, id]);
   if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
-  await audit(req.user?.userId, 'UPDATE', 'EMPLOYEE', id, b);
+
+  if (b.password !== undefined && String(b.password).trim()) {
+    const password = String(b.password);
+    if (password.length < 8) return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+    const hash = await bcrypt.hash(password, 12);
+    const encryptedPassword = encryptPassword(password);
+    const u = await query<any>('UPDATE users SET password_hash=$1,password_encrypted=$2 WHERE employee_id=$3 RETURNING id', [hash, encryptedPassword, id]);
+    if (!u.rows[0]) return res.status(404).json({ message: 'Employee account not found.' });
+  }
+
+  await audit(req.user?.userId, 'UPDATE', 'EMPLOYEE', id, { ...b, password: b.password ? '[updated]' : undefined });
   res.json(r.rows[0]);
 }
 export async function deleteEmployee(req: Request, res: Response) {
@@ -2801,6 +2844,13 @@ export async function notifications(req: Request, res: Response) {
   await syncDeadlineNotifications(req.user!.role === 'SUPER_ADMIN' ? null : req.user!.employeeId);
   if (req.user!.role === 'SUPER_ADMIN') { const r = await query<any>(`SELECT n.*,e.employee_code,e.first_name||' '||e.last_name employee_name FROM notifications n JOIN employees e ON e.id=n.employee_id ORDER BY n.created_at DESC LIMIT 300`); return res.json(r.rows); }
   const r = await query<any>('SELECT * FROM notifications WHERE employee_id=$1 ORDER BY created_at DESC LIMIT 100', [req.user!.employeeId]); res.json(r.rows);
+}
+export async function clearAllNotifications(req: Request, res: Response) {
+  const r = req.user!.role === 'SUPER_ADMIN'
+    ? await query<any>('DELETE FROM notifications RETURNING id')
+    : await query<any>('DELETE FROM notifications WHERE employee_id=$1 RETURNING id', [req.user!.employeeId]);
+  await audit(req.user?.userId, 'DELETE_ALL', 'NOTIFICATION', null, { count: r.rowCount || 0 });
+  res.json({ ok: true, count: r.rowCount || 0 });
 }
 export async function markNotification(req: Request, res: Response) { await query('UPDATE notifications SET is_read=true,read_at=now() WHERE id=$1 AND employee_id=$2', [Number(req.params.id), req.user!.employeeId]); res.json({ ok: true }); }
 export async function updateNotification(req: Request, res: Response) { const id = Number(req.params.id), { title, message } = req.body; const r = await query<any>('UPDATE notifications SET title=COALESCE($1,title),message=COALESCE($2,message) WHERE id=$3 RETURNING *', [title || null, message || null, id]); if (!r.rows[0]) return res.status(404).json({ message: 'Notification not found' }); await audit(req.user?.userId, 'UPDATE', 'NOTIFICATION', id); res.json(r.rows[0]); }

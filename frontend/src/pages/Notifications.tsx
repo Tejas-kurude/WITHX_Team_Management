@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react';
 import { api, messageOf } from '../services/api';
-import { Modal, PageTitle } from '../components/UI';
+import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
 
 export default function Notifications() {
@@ -9,6 +9,11 @@ export default function Notifications() {
 
   const [rows, setRows] = useState<any[]>([]);
   const [editing, setEditing] = useState<any | null>(null);
+<<<<<<< HEAD
+=======
+  const [selected, setSelected] = useState<any | null>(null);
+  const [confirmClear, setConfirmClear] = useState(false);
+>>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
 
   const [deleteNotification, setDeleteNotification] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -34,6 +39,31 @@ export default function Notifications() {
     try {
       await api.put(`/notifications/${id}/read`);
       await load();
+    } catch (e) {
+      setPageErr(messageOf(e));
+    }
+  }
+
+  async function openNotification(notification: any) {
+    setSelected(notification);
+
+    if (!notification.is_read) {
+      await read(notification.id);
+    }
+  }
+
+  async function clearAll() {
+    if (!rows.length) return;
+    setConfirmClear(true);
+  }
+
+  async function confirmClearAll() {
+    try {
+      setPageErr('');
+      await api.delete('/notifications');
+      setRows([]);
+      setSelected(null);
+      setConfirmClear(false);
     } catch (e) {
       setPageErr(messageOf(e));
     }
@@ -169,6 +199,16 @@ export default function Notifications() {
       <PageTitle
         title="Notifications"
         subtitle="Stay informed about tasks, approvals, attendance, leave requests, reports and important system updates."
+        action={
+          <button
+            type="button"
+            className="btn btn-primary"
+            disabled={!rows.length}
+            onClick={() => void clearAll()}
+          >
+            Clear All
+          </button>
+        }
       />
 
       {/* Notification Summary */}
@@ -232,7 +272,7 @@ export default function Notifications() {
                   {/* Notification Content */}
                   <button
                     type="button"
-                    onClick={() => read(n.id)}
+                    onClick={() => void openNotification(n)}
                     className="min-w-0 flex-1 text-left"
                   >
 
@@ -274,6 +314,10 @@ export default function Notifications() {
                     <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-600">
                       {n.message}
                     </p>
+
+                    <div className="mt-2 text-xs font-semibold text-cyan-700">
+                      Click to view details
+                    </div>
 
                     {/* Time */}
                     <div className="mt-3 text-xs font-medium text-slate-400">
@@ -422,6 +466,73 @@ export default function Notifications() {
         </Modal>
       )}
 
+<<<<<<< HEAD
+=======
+      {/* Notification Details Modal */}
+      {selected && (
+        <Modal
+          title={selected.title || 'Notification Details'}
+          onClose={() => setSelected(null)}
+        >
+          <div className="space-y-4">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <span
+                  className={`rounded-full px-3 py-1 text-xs font-extrabold ${getTypeStyle(
+                    getNotificationType(selected)
+                  )}`}
+                >
+                  {getNotificationType(selected)}
+                </span>
+
+                {!selected.is_read && (
+                  <span className="text-xs font-bold text-orange">
+                    New
+                  </span>
+                )}
+              </div>
+
+              <div className="mt-3 text-lg font-extrabold text-slate-900">
+                {selected.title}
+              </div>
+
+              {selected.employee_name && (
+                <div className="mt-1 text-sm font-bold text-orange">
+                  For: {selected.employee_name}
+                </div>
+              )}
+
+              <div className="mt-1 text-xs text-slate-400">
+                {selected.created_at
+                  ? new Date(selected.created_at).toLocaleString()
+                  : '—'}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                Details
+              </div>
+
+              <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                {selected.message || 'No additional details available.'}
+              </div>
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setSelected(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
+      )}
+
+>>>>>>> 4410d4c (Update notifications and employee password management and delete popup UI)
       {/* Delete Notification Modal */}
       {deleteNotification && (
         <Modal
@@ -546,6 +657,42 @@ export default function Notifications() {
 
           </div>
 
+        </Modal>
+      )}
+
+{/* Clear All Confirmation Modal */}
+      {confirmClear && (
+        <Modal
+          title="Clear All Notifications"
+          onClose={() => setConfirmClear(false)}
+        >
+          <div className="space-y-5">
+            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
+              <div className="font-extrabold">Are you sure?</div>
+              <div className="mt-1">
+                This will permanently remove all notifications currently
+                visible to you.
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-3">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setConfirmClear(false)}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="btn bg-red-600 text-white hover:bg-red-700"
+                onClick={() => void confirmClearAll()}
+              >
+                Clear All
+              </button>
+            </div>
+          </div>
         </Modal>
       )}
 
