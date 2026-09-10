@@ -45,6 +45,27 @@ async function isTeamMember(teamLeadId: number | null, employeeId: number) {
   return !!r.rows[0];
 }
 
+async function isEmployeeInAdminHierarchy(adminId: number | null, employeeId: number | null) {
+  if (!adminId || !employeeId) return false;
+  const r = await query<any>(`
+    SELECT 1
+    FROM employees e
+    WHERE e.id = $1
+      AND (
+        e.id = $2
+        OR e.admin_id = $2
+        OR e.team_lead_id IN (
+          SELECT tl.id
+          FROM employees tl
+          WHERE tl.admin_id = $2
+        )
+      )
+    LIMIT 1`,
+    [employeeId, adminId]
+  );
+  return !!r.rows[0];
+}
+
 async function requireTeamAuthority(req: Request, employeeId: number) {
   if (req.user!.role !== 'TEAM_LEAD') return true;
   return employeeId === req.user!.employeeId || await isTeamMember(req.user!.employeeId, employeeId);
@@ -201,7 +222,20 @@ export async function listEmployees(req: Request, res: Response) {
   if (userType) { p.push(userType); where += ` AND e.user_type=$${p.length}`; }
   if (role) { p.push(role); where += ` AND u.role=$${p.length}`; }
   if (teamLeadId && req.user!.role !== 'TEAM_LEAD') { p.push(Number(teamLeadId)); where += ` AND e.team_lead_id=$${p.length}`; }
-  const r = await query<any>(`SELECT e.*,d.name department_name,tl.first_name||' '||tl.last_name team_lead_name,u.role,u.password_encrypted FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees tl ON tl.id=e.team_lead_id LEFT JOIN users u ON u.employee_id=e.id ${where} ORDER BY e.created_at DESC`, p);
+  const r = await query<any>(`SELECT e.*,d.name department_name,tl.first_name||' '||tl.last_name team_lead_name,
+    COALESCE(
+      ad.first_name||' '||ad.last_name,
+      team_admin.first_name||' '||team_admin.last_name
+    ) AS admin_name,
+    u.role,u.password_encrypted
+    FROM employees e
+    LEFT JOIN departments d ON d.id=e.department_id
+    LEFT JOIN employees tl ON tl.id=e.team_lead_id
+    LEFT JOIN employees ad ON ad.id=e.admin_id
+    LEFT JOIN employees team_admin ON team_admin.id=tl.admin_id
+    LEFT JOIN users u ON u.employee_id=e.id
+    ${where}
+    ORDER BY e.created_at DESC`, p);
   res.json(r.rows.map((row: any) => {
     const { password_encrypted, ...safeRow } = row;
     return req.user!.role === 'SUPER_ADMIN'
@@ -218,21 +252,46 @@ export async function getEmployee(req: Request, res: Response) {
   res.json(r.rows[0]);
 }
 export async function createEmployee(req: Request, res: Response) {
-  const { firstName, lastName, email, phone, jobTitle, departmentId, role = 'EMPLOYEE', joiningDate, password, teamLeadId, userType = 'EMPLOYEE' } = req.body;
+  const { firstName, lastName, email, phone, jobTitle, departmentId, role = 'EMPLOYEE', joiningDate, password, teamLeadId, adminId, userType = 'EMPLOYEE' } = req.body;
   if (!firstName || !lastName || !email || !password) return res.status(400).json({ message: 'First name, last name, email and password are required' });
   if (!['INTERN', 'EMPLOYEE'].includes(userType)) return res.status(400).json({ message: 'User type must be INTERN or EMPLOYEE' });
   if (!['EMPLOYEE', 'TEAM_LEAD', 'ADMIN', 'SUPER_ADMIN'].includes(role)) return res.status(400).json({ message: 'Invalid role' });
   if (req.user!.role === 'ADMIN' && ['ADMIN', 'SUPER_ADMIN'].includes(role)) return res.status(403).json({ message: 'Only Super Admin can create Admin or Super Admin accounts.' });
+
+  const parsedAdminId = numOrNull(adminId);
+  if (role === 'TEAM_LEAD') {
+    if (!parsedAdminId) return res.status(400).json({ message: 'Please assign an Admin to the Team Lead.' });
+  }
+
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    if (role === 'TEAM_LEAD') {
+      const adminCheck = await client.query<any>(`
+        SELECT e.id
+        FROM employees e
+        JOIN users u ON u.employee_id=e.id
+        WHERE e.id=$1
+          AND u.role='ADMIN'
+          AND u.is_active=true
+          AND e.status='ACTIVE'
+        LIMIT 1`,
+        [parsedAdminId]
+      );
+      if (!adminCheck.rows[0]) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ message: 'Selected Admin is not a valid active Admin account.' });
+      }
+    }
+
     const code = await nextUserCode(client, userType);
-    const e = await client.query<any>(`INSERT INTO employees(employee_code,user_type,first_name,last_name,email,phone,job_title,department_id,joining_date,team_lead_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`, [code, userType, firstName, lastName, email, textOrNull(phone), textOrNull(jobTitle), numOrNull(departmentId), joiningDate || new Date().toISOString().slice(0, 10), numOrNull(teamLeadId)]);
+    const e = await client.query<any>(`INSERT INTO employees(employee_code,user_type,first_name,last_name,email,phone,job_title,department_id,joining_date,team_lead_id,admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [code, userType, firstName, lastName, email, textOrNull(phone), textOrNull(jobTitle), numOrNull(departmentId), joiningDate || new Date().toISOString().slice(0, 10), numOrNull(teamLeadId), role === 'TEAM_LEAD' ? parsedAdminId : null]);
     const hash = await bcrypt.hash(password, 12);
     const encryptedPassword = encryptPassword(password);
     await client.query('INSERT INTO users(email,password_hash,password_encrypted,role,employee_id) VALUES($1,$2,$3,$4,$5)', [email, hash, encryptedPassword, role, e.rows[0].id]);
     await client.query('COMMIT');
-    await audit(req.user?.userId, 'CREATE', userType, e.rows[0].id, { code, email, role, departmentId, teamLeadId });
+    await audit(req.user?.userId, 'CREATE', userType, e.rows[0].id, { code, email, role, departmentId, teamLeadId, adminId: role === 'TEAM_LEAD' ? parsedAdminId : null });
     res.status(201).json(e.rows[0]);
   } catch (err: any) {
     await client.query('ROLLBACK');
@@ -240,9 +299,40 @@ export async function createEmployee(req: Request, res: Response) {
     throw err;
   } finally { client.release(); }
 }
+
 export async function updateEmployee(req: Request, res: Response) {
   const id = Number(req.params.id), b = req.body;
-  const r = await query<any>(`UPDATE employees SET first_name=COALESCE($1,first_name),last_name=COALESCE($2,last_name),phone=$3,job_title=$4,department_id=$5,team_lead_id=$6,status=COALESCE($7,status),updated_at=now() WHERE id=$8 RETURNING *`, [b.firstName || null, b.lastName || null, textOrNull(b.phone), textOrNull(b.jobTitle), numOrNull(b.departmentId), numOrNull(b.teamLeadId), b.status || null, id]);
+
+  const existing = await query<any>(`
+    SELECT e.*, u.role
+    FROM employees e
+    LEFT JOIN users u ON u.employee_id=e.id
+    WHERE e.id=$1
+    LIMIT 1`,
+    [id]
+  );
+  if (!existing.rows[0]) return res.status(404).json({ message: 'Employee not found' });
+
+  const effectiveRole = String(b.role || existing.rows[0].role || 'EMPLOYEE').toUpperCase();
+  const parsedAdminId = numOrNull(b.adminId);
+
+  if (effectiveRole === 'TEAM_LEAD') {
+    if (!parsedAdminId) return res.status(400).json({ message: 'Please assign an Admin to the Team Lead.' });
+    const adminCheck = await query<any>(`
+      SELECT e.id
+      FROM employees e
+      JOIN users u ON u.employee_id=e.id
+      WHERE e.id=$1
+        AND u.role='ADMIN'
+        AND u.is_active=true
+        AND e.status='ACTIVE'
+      LIMIT 1`,
+      [parsedAdminId]
+    );
+    if (!adminCheck.rows[0]) return res.status(400).json({ message: 'Selected Admin is not a valid active Admin account.' });
+  }
+
+  const r = await query<any>(`UPDATE employees SET first_name=COALESCE($1,first_name),last_name=COALESCE($2,last_name),phone=$3,job_title=$4,department_id=$5,team_lead_id=$6,admin_id=$7,status=COALESCE($8,status),updated_at=now() WHERE id=$9 RETURNING *`, [b.firstName || null, b.lastName || null, textOrNull(b.phone), textOrNull(b.jobTitle), numOrNull(b.departmentId), numOrNull(b.teamLeadId), effectiveRole === 'TEAM_LEAD' ? parsedAdminId : null, b.status || null, id]);
   if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
 
   if (b.password !== undefined && String(b.password).trim()) {
@@ -254,7 +344,7 @@ export async function updateEmployee(req: Request, res: Response) {
     if (!u.rows[0]) return res.status(404).json({ message: 'Employee account not found.' });
   }
 
-  await audit(req.user?.userId, 'UPDATE', 'EMPLOYEE', id, { ...b, password: b.password ? '[updated]' : undefined });
+  await audit(req.user?.userId, 'UPDATE', 'EMPLOYEE', id, { ...b, adminId: effectiveRole === 'TEAM_LEAD' ? parsedAdminId : null, password: b.password ? '[updated]' : undefined });
   res.json(r.rows[0]);
 }
 export async function deleteEmployee(req: Request, res: Response) {
@@ -300,6 +390,15 @@ export async function listTasks(req: Request, res: Response) {
   const p: any[] = []; let w = 'WHERE 1=1';
   if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND t.assigned_to=$${p.length}`; }
   else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND (t.assigned_to=$${p.length} OR e.team_lead_id=$${p.length})`; }
+  else if (req.user!.role === 'ADMIN') {
+    p.push(req.user!.employeeId);
+    const adminParam = p.length;
+    w += ` AND (
+      t.assigned_to=$${adminParam}
+      OR e.id IN (SELECT tl.id FROM employees tl WHERE tl.admin_id=$${adminParam})
+      OR e.team_lead_id IN (SELECT tl.id FROM employees tl WHERE tl.admin_id=$${adminParam})
+    )`;
+  }
   if (search) { p.push(`%${search}%`); w += ` AND (t.title ILIKE $${p.length} OR t.description ILIKE $${p.length} OR e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length})`; }
   if (status) {
     if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED')`;
@@ -759,13 +858,37 @@ res.json(r.rows);
 }
 export async function createTask(req: Request, res: Response) {
   const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl } = req.body;
-  if (!title) return res.status(400).json({ message: 'Task title is required.' });
-  const type = String(assignmentType).toUpperCase();
-  if (!['INDIVIDUAL', 'MULTIPLE', 'TEAM', 'DEPARTMENT'].includes(type)) return res.status(400).json({ message: 'Invalid assignment type.' });
+if (!title || !String(title).trim()) {
+  return res.status(400).json({
+    message: 'Task title is required.'
+  });
+}
+
+if (String(title).trim().length > 500) {
+  return res.status(400).json({
+    message: 'Task title must be 500 characters or less. Put additional details in the description.'
+  });
+}  const type = String(assignmentType).toUpperCase();
+  if (!['INDIVIDUAL', 'MULTIPLE', 'TEAM', 'DEPARTMENT', 'ADMIN'].includes(type)) return res.status(400).json({ message: 'Invalid assignment type.' });
   let ids: number[] = [];
   let scopeRef: number | null = null;
   if (type === 'INDIVIDUAL') ids = [Number(assignedTo)].filter(Boolean);
   if (type === 'MULTIPLE') ids = (Array.isArray(assignedToIds) ? assignedToIds : String(assignedToIds || '').split(',')).map(Number).filter(Boolean);
+  if (type === 'ADMIN') {
+    if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
+      return res.status(403).json({ message: 'Only Admins and Super Admin can create Admin-assigned tasks.' });
+    }
+    const rr = await query<any>(`
+      SELECT e.id
+      FROM employees e
+      JOIN users u ON u.employee_id=e.id
+      WHERE u.role='ADMIN'
+        AND u.is_active=true
+        AND e.status='ACTIVE'
+      ORDER BY e.first_name,e.last_name,e.id
+    `);
+    ids = rr.rows.map(x => x.id);
+  }
   if (type === 'TEAM') {
     scopeRef = req.user!.role === 'TEAM_LEAD' ? req.user!.employeeId : Number(teamLeadId);
     if (!scopeRef) return res.status(400).json({ message: 'Select a team lead/team.' });
@@ -1723,6 +1846,29 @@ export async function reviewTask(
       return res.status(403).json({
         message:
           'You can review only tasks assigned to employees/interns under your supervision.'
+      });
+    }
+  }
+
+  /*
+   * =====================================================
+   * ADMIN AUTHORIZATION
+   * =====================================================
+   *
+   * Admins may review only tasks assigned to themselves
+   * or to Team Leads / team members connected to them.
+   */
+
+  if (role === 'ADMIN') {
+    const hasAccess = await isEmployeeInAdminHierarchy(
+      reviewerEmployeeId,
+      task.assigned_to
+    );
+
+    if (!hasAccess) {
+      return res.status(403).json({
+        message:
+          'You can review only your own tasks and tasks belonging to teams under your Admin account.'
       });
     }
   }
@@ -2925,60 +3071,241 @@ export async function performance(req: Request, res: Response) {
     }
     targets = [requestedEmployeeId];
   } else if (req.user!.role === 'TEAM_LEAD') {
-    const team = await query<any>('SELECT id FROM employees WHERE team_lead_id=$1 AND status <> \'INACTIVE\'', [req.user!.employeeId]);
+    const team = await query<any>(
+      'SELECT id FROM employees WHERE team_lead_id=$1 AND status <> \'INACTIVE\'',
+      [req.user!.employeeId]
+    );
     targets = team.rows.map((row: any) => Number(row.id));
   } else {
-    const employees = await query<any>('SELECT id FROM employees WHERE status <> \'INACTIVE\'');
+    const employees = await query<any>(
+      'SELECT id FROM employees WHERE status <> \'INACTIVE\''
+    );
     targets = employees.rows.map((row: any) => Number(row.id));
   }
 
   targets = targets.filter(Number.isFinite);
-  if (!targets.length) return res.status(400).json({ message: 'No employees available for performance calculation.' });
+  if (!targets.length) {
+    return res.status(400).json({
+      message: 'No employees available for performance calculation.'
+    });
+  }
 
   const safeNumber = (value: any, fallback = 0) => {
     const n = Number(value);
     return Number.isFinite(n) ? n : fallback;
   };
 
+  const clampPercent = (value: any, fallback = 0) =>
+    Math.max(0, Math.min(100, safeNumber(value, fallback)));
+
   const calculated: any[] = [];
+
   for (const target of targets) {
+    /*
+     * ---------------------------------------------------------
+     * 1. USE TODAY'S EFFECTIVE WORK-HOURS TARGET
+     * ---------------------------------------------------------
+     *
+     * The current work-hours configuration applies to TODAY.
+     * Older performance records keep the target that was stored
+     * when they were calculated.
+     */
     const minimumWorkHours = await getEffectiveWorkHours(target);
-    const { rows } = await query<any>(`
+
+    /*
+     * ---------------------------------------------------------
+     * 2. GET TODAY'S PERFORMANCE INPUTS
+     * ---------------------------------------------------------
+     *
+     * Today is calculated separately from the previous overall
+     * performance. This prevents a new work-hours target from
+     * recalculating/replacing the employee's entire previous score.
+     */
+    const { rows } = await query<any>(
+      `
       WITH task AS (
-        SELECT count(*) FILTER(WHERE status <> 'CANCELLED') task_total,
-               count(*) FILTER(WHERE status='COMPLETED') task_completed,
-               count(*) FILTER(
-                 WHERE status='COMPLETED'
-                   AND (due_date IS NULL OR completed_at<=due_date)
-               ) task_ontime
+        SELECT
+          count(*) FILTER (
+            WHERE status <> 'CANCELLED'
+          ) AS task_total,
+
+          count(*) FILTER (
+            WHERE status = 'COMPLETED'
+          ) AS task_completed,
+
+          count(*) FILTER (
+            WHERE status = 'COMPLETED'
+              AND (due_date IS NULL OR completed_at <= due_date)
+          ) AS task_ontime
         FROM tasks
-        WHERE assigned_to=$1
-          AND created_at::date >= current_date - interval '29 days'
-      ), att AS (
-        SELECT count(*) attendance_total,
-               count(*) FILTER(WHERE status IN('PRESENT','LATE')) attended,
-               avg(LEAST(COALESCE(total_hours,0) / $2::numeric, 1.0))
-                 FILTER(WHERE status IN('PRESENT','LATE')) work_ratio
+        WHERE assigned_to = $1
+          AND created_at::date = current_date
+      ),
+      att AS (
+        SELECT
+          count(*) AS attendance_total,
+
+          count(*) FILTER (
+            WHERE status IN ('PRESENT', 'LATE')
+          ) AS attended,
+
+          COALESCE(
+            SUM(
+              CASE
+                WHEN status IN ('PRESENT', 'LATE')
+                THEN LEAST(COALESCE(total_hours, 0) / $2::numeric, 1.0)
+                ELSE 0
+              END
+            ),
+            0
+          ) AS work_ratio
         FROM attendance
-        WHERE employee_id=$1
-          AND work_date >= current_date - interval '29 days'
+        WHERE employee_id = $1
+          AND work_date = current_date
           AND status <> 'LEAVE'
       )
-      SELECT * FROM task,att`, [target, minimumWorkHours]);
+      SELECT * FROM task, att
+      `,
+      [target, minimumWorkHours]
+    );
 
-    const x = rows[0] || {};
-    const taskTotal = safeNumber(x.task_total);
-    const taskCompleted = safeNumber(x.task_completed);
-    const taskOntime = safeNumber(x.task_ontime);
-    const attendanceTotal = safeNumber(x.attendance_total);
-    const attended = safeNumber(x.attended);
-    const workRatio = safeNumber(x.work_ratio);
+    const today = rows[0] || {};
 
-    const taskCompletion = taskTotal > 0 ? (taskCompleted / taskTotal) * 100 : 100;
-    const onTime = taskCompleted > 0 ? (taskOntime / taskCompleted) * 100 : 100;
-    const attendance = attendanceTotal > 0 ? (attended / attendanceTotal) * 100 : 100;
-    const workingHours = Math.max(0, Math.min(100, workRatio * 100));
+    const todayTaskTotal = safeNumber(today.task_total);
+    const todayTaskCompleted = safeNumber(today.task_completed);
+    const todayTaskOntime = safeNumber(today.task_ontime);
+    const todayAttendanceTotal = safeNumber(today.attendance_total);
+    const todayAttended = safeNumber(today.attended);
+    const todayWorkRatio = safeNumber(today.work_ratio);
 
+    /*
+     * Daily component scores.
+     *
+     * When there is no work/task/attendance record for the day,
+     * keep the existing system behavior of treating that metric
+     * as fully satisfied rather than forcing it to zero.
+     */
+    const todayTaskCompletion =
+      todayTaskTotal > 0
+        ? (todayTaskCompleted / todayTaskTotal) * 100
+        : 100;
+
+    const todayOnTime =
+      todayTaskCompleted > 0
+        ? (todayTaskOntime / todayTaskCompleted) * 100
+        : 100;
+
+    const todayAttendance =
+      todayAttendanceTotal > 0
+        ? (todayAttended / todayAttendanceTotal) * 100
+        : 100;
+
+    /*
+     * Work-hours performance is based ONLY on today's attendance
+     * record(s), using today's effective required-hours target.
+     *
+     * Example:
+     * 0.25 hours worked / 0.25 required = 100%.
+     */
+    const todayWorkingHours = clampPercent(todayWorkRatio * 100, 100);
+
+    /*
+     * ---------------------------------------------------------
+     * 3. GET THE PREVIOUS OVERALL PERFORMANCE
+     * ---------------------------------------------------------
+     *
+     * IMPORTANT:
+     * Ignore performance rows already created today.
+     *
+     * This makes repeated "Calculate" clicks on the same day
+     * recalculate TODAY and combine it with the same previous
+     * overall score instead of counting today's performance
+     * multiple times.
+     */
+    const previousResult = await query<any>(
+      `
+      SELECT
+        score,
+        task_completion,
+        on_time,
+        attendance,
+        working_hours,
+        period_start,
+        period_end
+      FROM performance_scores
+      WHERE employee_id = $1
+        AND period_end < current_date
+      ORDER BY period_end DESC, created_at DESC
+      LIMIT 1
+      `,
+      [target]
+    );
+
+    const previous = previousResult.rows[0] || null;
+
+    let periodStart = new Date().toISOString().slice(0, 10);
+    let periodDays = 1;
+
+    let taskCompletion = todayTaskCompletion;
+    let onTime = todayOnTime;
+    let attendance = todayAttendance;
+    let workingHours = todayWorkingHours;
+
+    if (previous) {
+      /*
+       * The previous score represents the accumulated period that
+       * ended before today. Today is added as one additional day.
+       */
+      const previousStart = new Date(previous.period_start);
+      const previousEnd = new Date(previous.period_end);
+
+      const millisecondsPerDay = 24 * 60 * 60 * 1000;
+      const previousDays = Math.max(
+        1,
+        Math.floor(
+          (previousEnd.getTime() - previousStart.getTime()) /
+            millisecondsPerDay
+        ) + 1
+      );
+
+      periodDays = previousDays + 1;
+      periodStart = previous.period_start;
+
+      taskCompletion =
+        (
+          clampPercent(previous.task_completion, 100) * previousDays +
+          todayTaskCompletion
+        ) / periodDays;
+
+      onTime =
+        (
+          clampPercent(previous.on_time, 100) * previousDays +
+          todayOnTime
+        ) / periodDays;
+
+      attendance =
+        (
+          clampPercent(previous.attendance, 100) * previousDays +
+          todayAttendance
+        ) / periodDays;
+
+      workingHours =
+        (
+          clampPercent(previous.working_hours, 100) * previousDays +
+          todayWorkingHours
+        ) / periodDays;
+    }
+
+    taskCompletion = clampPercent(taskCompletion, 100);
+    onTime = clampPercent(onTime, 100);
+    attendance = clampPercent(attendance, 100);
+    workingHours = clampPercent(workingHours, 100);
+
+    /*
+     * ---------------------------------------------------------
+     * 4. EXISTING PERFORMANCE WEIGHTS — UNCHANGED
+     * ---------------------------------------------------------
+     */
     const rawScore =
       (taskCompletion * 0.35) +
       (onTime * 0.25) +
@@ -2989,10 +3316,17 @@ export async function performance(req: Request, res: Response) {
       ? Math.max(0, Math.min(100, rawScore))
       : 0;
 
-    const start = new Date();
-    start.setDate(start.getDate() - 29);
-
-    const r = await query<any>(`
+    /*
+     * ---------------------------------------------------------
+     * 5. SAVE TODAY'S UPDATED OVERALL PERFORMANCE
+     * ---------------------------------------------------------
+     *
+     * The stored required_work_hours is today's active target.
+     * Older rows remain unchanged, so historical targets remain
+     * preserved exactly as before.
+     */
+    const r = await query<any>(
+      `
       INSERT INTO performance_scores(
         employee_id,
         period_start,
@@ -3006,17 +3340,32 @@ export async function performance(req: Request, res: Response) {
         required_work_hours,
         score
       )
-      VALUES($1,$2,current_date,$3,$4,$5,0,0,$6,$7,$8) RETURNING *`,
+      VALUES(
+        $1,
+        $2,
+        current_date,
+        $3,
+        $4,
+        $5,
+        0,
+        0,
+        $6,
+        $7,
+        $8
+      )
+      RETURNING *
+      `,
       [
         target,
-        start.toISOString().slice(0, 10),
-        Math.max(0, Math.min(100, safeNumber(taskCompletion, 100))),
-        Math.max(0, Math.min(100, safeNumber(onTime, 100))),
-        Math.max(0, Math.min(100, safeNumber(attendance, 100))),
+        periodStart,
+        taskCompletion,
+        onTime,
+        attendance,
         workingHours,
         minimumWorkHours,
         score,
-      ]);
+      ]
+    );
 
     calculated.push(r.rows[0]);
   }

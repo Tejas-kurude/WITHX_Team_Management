@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS employees (
   job_title VARCHAR(120),
   department_id INT REFERENCES departments(id) ON DELETE RESTRICT,
   team_lead_id INT REFERENCES employees(id) ON DELETE SET NULL,
+  admin_id INT REFERENCES employees(id) ON DELETE SET NULL,
   joining_date DATE NOT NULL DEFAULT current_date,
   status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE' CHECK(status IN('ACTIVE','INACTIVE')),
   created_at TIMESTAMPTZ DEFAULT now(),
@@ -50,9 +51,9 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS tasks (
   id SERIAL PRIMARY KEY,
   assignment_batch_id UUID NOT NULL DEFAULT gen_random_uuid(),
-  assignment_scope VARCHAR(30) NOT NULL DEFAULT 'INDIVIDUAL' CHECK(assignment_scope IN('INDIVIDUAL','MULTIPLE','TEAM','DEPARTMENT')),
+  assignment_scope VARCHAR(30) NOT NULL DEFAULT 'INDIVIDUAL' CHECK(assignment_scope IN('INDIVIDUAL','MULTIPLE','TEAM','DEPARTMENT','ADMIN')),
   scope_ref_id INT,
-  title VARCHAR(220) NOT NULL,
+  title VARCHAR(500) NOT NULL,
   description TEXT,
   assigned_to INT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
   created_by INT REFERENCES employees(id) ON DELETE SET NULL,
@@ -188,6 +189,7 @@ CREATE TABLE IF NOT EXISTS system_settings (
 
 CREATE INDEX IF NOT EXISTS idx_employees_department ON employees(department_id);
 CREATE INDEX IF NOT EXISTS idx_employees_team_lead ON employees(team_lead_id);
+CREATE INDEX IF NOT EXISTS idx_employees_admin_id ON employees(admin_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assignee ON tasks(assigned_to,status);
 CREATE INDEX IF NOT EXISTS idx_tasks_batch ON tasks(assignment_batch_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_employee_date ON attendance(employee_id,work_date DESC);

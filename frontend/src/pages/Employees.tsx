@@ -14,6 +14,8 @@ export default function Employees() {
 
   const [rows, setRows] = useState<any[]>([]);
   const [deps, setDeps] = useState<any[]>([]);
+  const [admins, setAdmins] = useState<any[]>([]);
+  const [selectedRole, setSelectedRole] = useState('EMPLOYEE');
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
 
@@ -51,6 +53,11 @@ export default function Employees() {
     void api
       .get('/departments')
       .then(r => setDeps(r.data))
+      .catch(e => setPageErr(messageOf(e)));
+
+    void api
+      .get('/employees', { params: { role: 'ADMIN', status: 'ACTIVE' } })
+      .then(r => setAdmins(Array.isArray(r.data) ? r.data : []))
       .catch(e => setPageErr(messageOf(e)));
   }, []);
 
@@ -117,6 +124,7 @@ export default function Employees() {
               className="btn btn-accent"
               onClick={() => {
                 setEditing(null);
+                setSelectedRole('EMPLOYEE');
                 setShow(true);
               }}
             >
@@ -188,6 +196,7 @@ export default function Employees() {
                 <th>Type</th>
                 <th>Department</th>
                 <th>Team Lead</th>
+                <th>Admin</th>
                 <th>Role</th>
                 <th>Status</th>
 
@@ -229,6 +238,10 @@ export default function Employees() {
                   </td>
 
                   <td>
+                    {r.admin_name || '—'}
+                  </td>
+
+                  <td>
                     {r.role?.replace(/_/g, ' ') || '—'}
                   </td>
 
@@ -246,6 +259,7 @@ export default function Employees() {
                           className="btn !px-3 !py-1.5"
                           onClick={() => {
                             setEditing(r);
+                            setSelectedRole(r.role || 'EMPLOYEE');
                             setShow(true);
                           }}
                         >
@@ -286,6 +300,7 @@ export default function Employees() {
           onClose={() => {
             setShow(false);
             setEditing(null);
+            setSelectedRole('EMPLOYEE');
             setErr('');
           }}
         >
@@ -385,6 +400,8 @@ export default function Employees() {
                   <select
                     className="input mt-1"
                     name="role"
+                    value={selectedRole}
+                    onChange={e => setSelectedRole(e.target.value)}
                   >
                     <option>EMPLOYEE</option>
                     <option>TEAM_LEAD</option>
@@ -399,6 +416,31 @@ export default function Employees() {
                 </div>
 
               </>
+            )}
+
+            {editing && (
+              <div>
+                <label className="label">
+                  Role
+                </label>
+
+                <select
+                  className="input mt-1"
+                  name="role"
+                  value={selectedRole}
+                  onChange={e => setSelectedRole(e.target.value)}
+                >
+                  <option value="EMPLOYEE">EMPLOYEE</option>
+                  <option value="TEAM_LEAD">TEAM_LEAD</option>
+
+                  {isSuper && (
+                    <>
+                      <option value="ADMIN">ADMIN</option>
+                      <option value="SUPER_ADMIN">SUPER_ADMIN</option>
+                    </>
+                  )}
+                </select>
+              </div>
             )}
 
             <div>
@@ -481,6 +523,32 @@ export default function Employees() {
               </select>
             </div>
 
+            {(selectedRole === 'TEAM_LEAD' || editing?.role === 'TEAM_LEAD') && (
+              <div>
+                <label className="label">
+                  Assign Admin
+                </label>
+                <select
+                  className="input mt-1"
+                  name="adminId"
+                  defaultValue={editing?.admin_id || ''}
+                  required={selectedRole === 'TEAM_LEAD' || editing?.role === 'TEAM_LEAD'}
+                >
+                  <option value="">
+                    Select Admin
+                  </option>
+                  {admins.map(admin => (
+                    <option key={admin.id} value={admin.id}>
+                      {admin.employee_code} — {admin.first_name} {admin.last_name}
+                    </option>
+                  ))}
+                </select>
+                <div className="mt-1 text-xs muted">
+                  This Team Lead will be connected to the selected Admin.
+                </div>
+              </div>
+            )}
+
             {editing ? (
               <div>
 
@@ -528,6 +596,7 @@ export default function Employees() {
                 onClick={() => {
                   setShow(false);
                   setEditing(null);
+                  setSelectedRole('EMPLOYEE');
                   setErr('');
                 }}
               >

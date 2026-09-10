@@ -1992,6 +1992,12 @@ const canCurrentUserReview =
                         Department
                       </option>
                     )}
+
+                    {(['ADMIN', 'SUPER_ADMIN'] as string[]).includes(user?.role || '') && (
+                      <option value="ADMIN">
+                        Admin
+                      </option>
+                    )}
                   </select>
                 </div>
 
@@ -2112,6 +2118,15 @@ const canCurrentUserReview =
                       </option>
                     ))}
                   </select>
+                )}
+
+                {/* ADMIN */}
+
+                {assignmentType === 'ADMIN' && (
+                  <div className="rounded-lg bg-emerald-50 p-3 text-sm text-emerald-800">
+                    This task will be assigned to all active Admin accounts.
+                    Each Admin will see the task in their own task list, subject to their existing Admin team visibility.
+                  </div>
                 )}
 
                 <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
