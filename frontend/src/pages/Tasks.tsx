@@ -2,7 +2,6 @@ import { FormEvent, useEffect, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
-import { useSearchParams } from 'react-router-dom';
 
 const statuses = [
   'PENDING',
@@ -17,7 +16,6 @@ const statuses = [
 
 export default function Tasks() {
   const { user } = useAuth();
-  const [searchParams] = useSearchParams();
 
   const isSuper = user?.role === 'SUPER_ADMIN';
   const canAssign = user?.role !== 'EMPLOYEE';
@@ -47,26 +45,40 @@ const [deleting, setDeleting] = useState(false);
   const [historyLoadingId, setHistoryLoadingId] = useState<number | null>(null);
   const [historyError, setHistoryError] = useState<Record<number, string>>({});
 
+  const [editDetails, setEditDetails] = useState<any | null>(null);
+  const [seenEditedAt, setSeenEditedAt] = useState<Record<number, string | null>>({});
+
+  function markEditedTaskSeen(task: any) {
+    const taskId = Number(task.id);
+    setSeenEditedAt((prev) => ({
+      ...prev,
+      [taskId]: task.latest_edit_at || null,
+    }));
+  }
+
   const [err, setErr] = useState('');
   const [pageErr, setPageErr] = useState('');
 
   const [assignmentType, setAssignmentType] =
     useState('INDIVIDUAL');
 
-  const [filters, setFilters] = useState<any>(() => ({
-    search: searchParams.get('search') || '',
-    status: searchParams.get('status') || '',
-    priority: searchParams.get('priority') || '',
-    department: searchParams.get('department') || '',
-    employeeId: searchParams.get('employeeId') || '',
-    date: searchParams.get('date') || '',
-  }));
+  const [filters, setFilters] = useState<any>({
+    search: '',
+    status: '',
+    priority: '',
+    department: '',
+    employeeId: '',
+    date: '',
+  });
+
+  const [showAdminTasks, setShowAdminTasks] =
+    useState(false);
 
   /* =========================================================
      LOAD TASKS
   ========================================================= */
 
-  async function load() {
+  async function load(adminOnly = showAdminTasks) {
     try {
       setPageErr('');
 
@@ -74,7 +86,25 @@ const [deleting, setDeleting] = useState(false);
         params: filters,
       });
 
-      setRows(r.data);
+      const taskRows = Array.isArray(r.data)
+        ? r.data
+        : [];
+
+      if (adminOnly) {
+        const adminEmployeeIds = new Set(
+          emps
+            .filter((e) => e.role === 'ADMIN')
+            .map((e) => Number(e.id))
+        );
+
+        setRows(
+          taskRows.filter((task: any) =>
+            adminEmployeeIds.has(Number(task.assigned_to))
+          )
+        );
+      } else {
+        setRows(taskRows);
+      }
     } catch (e) {
       setPageErr(messageOf(e));
     }
@@ -504,19 +534,75 @@ async function toggleReviewHistory(task: any) {
         subtitle="Individual, multiple-user, team and department task assignment"
         action={
           canAssign ? (
-            <button
-              className="btn btn-accent"
-              onClick={() => {
-                setEditing(null);
-                setAssignmentType(
-                  'INDIVIDUAL'
-                );
-                setErr('');
-                setShow(true);
-              }}
-            >
-              + Create Task
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                className="btn btn-accent"
+                onClick={() => {
+                  setEditing(null);
+                  setAssignmentType(
+                    'INDIVIDUAL'
+                  );
+                  setErr('');
+                  setShow(true);
+                }}
+              >
+                + Create Task
+              </button>
+
+              {isSuper && (
+                <button
+                  type="button"
+                  className={`btn ${
+                    showAdminTasks
+                      ? '!bg-emerald-700 !text-white hover:!bg-emerald-800'
+                      : '!border-emerald-300 !bg-emerald-50 !text-emerald-800 hover:!bg-emerald-100'
+                  }`}
+                  onClick={async () => {
+                    const next = !showAdminTasks;
+                    setShowAdminTasks(next);
+
+                    if (!next) {
+                      await load(false);
+                      return;
+                    }
+
+                    const nextFilters = {
+                      ...filters,
+                      employeeId: '',
+                    };
+
+                    setFilters(nextFilters);
+
+                    try {
+                      setPageErr('');
+                      const r = await api.get('/tasks', {
+                        params: nextFilters,
+                      });
+                      const taskRows = Array.isArray(r.data)
+                        ? r.data
+                        : [];
+                      const adminEmployeeIds = new Set(
+                        emps
+                          .filter((e) => e.role === 'ADMIN')
+                          .map((e) => Number(e.id))
+                      );
+
+                      setRows(
+                        taskRows.filter((task: any) =>
+                          adminEmployeeIds.has(
+                            Number(task.assigned_to)
+                          )
+                        )
+                      );
+                    } catch (e) {
+                      setPageErr(messageOf(e));
+                    }
+                  }}
+                >
+                  Admin
+                </button>
+              )}
+            </div>
           ) : undefined
         }
       />
@@ -773,6 +859,11 @@ const canCurrentUserReview =
               t.super_admin_review_decision ===
                 'APPROVED';
 
+            const isEditedTask = t.is_edited === true;
+            const showEditedDot =
+              isEditedTask &&
+              seenEditedAt[Number(t.id)] !== t.latest_edit_at;
+
             return (
               <div
                 className="relative"
@@ -789,15 +880,32 @@ const canCurrentUserReview =
                   }}
                 >
                   <div
-                    className={`card p-5 ${
+                    className={`card relative p-5 transition-all duration-300 ${
                       t.display_status ===
                       'OVERDUE'
                         ? 'border-red-300'
                         : ''
+                    } ${
+                      isEditedTask
+                        ? 'border-emerald-300 bg-emerald-50/30 ring-1 ring-emerald-200 shadow-md'
+                        : ''
                     }`}
                     key={t.id}
                     style={{ backfaceVisibility: 'hidden' }}
+                    onClick={() => {
+                      if (isEditedTask && showEditedDot) {
+                        markEditedTaskSeen(t);
+                      }
+                    }}
                   >
+
+                    {showEditedDot && (
+                      <span
+                        className="absolute right-3 top-3 z-10 h-3 w-3 rounded-full border-2 border-white bg-emerald-500 shadow-sm"
+                        title="Task was edited"
+                        aria-label="Task was edited"
+                      />
+                    )}
 
                 {/* =================================================
                     TASK HEADER
@@ -873,8 +981,24 @@ const canCurrentUserReview =
 
                     {/* TASK ID + TITLE + ASSIGNEE BELOW BUTTONS */}
                     <div>
-                      <div className="text-xs font-bold text-orange">
-                        TASK #{t.id} • {t.employee_code}
+                      <div className="flex flex-wrap items-center gap-2">
+                        <div className="text-xs font-bold text-orange">
+                          TASK #{t.id} • {t.employee_code}
+                        </div>
+
+                        {isEditedTask && (
+                          <span
+                            className="inline-flex items-center gap-1 rounded-full border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-extrabold tracking-wide text-emerald-700"
+                            title={
+                              t.latest_edit_by
+                                ? `Edited by ${t.latest_edit_by}`
+                                : 'Task edited'
+                            }
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                            EDITED
+                          </span>
+                        )}
                       </div>
 
                       <h3 className="mt-0.5 text-[18px] font-extrabold leading-6 text-navy">
@@ -1485,6 +1609,13 @@ const canCurrentUserReview =
                               title = `${roleLabel} Review`;
                               icon = '⏳';
                             }
+                          } else if (eventType === 'EDITED') {
+                            title = 'Task Edited';
+                            icon = '✎';
+                            boxClass =
+                              'rounded-xl border border-emerald-200 bg-emerald-50 p-4';
+                            titleClass =
+                              'font-bold text-emerald-800';
                           } else if (
                             eventType === 'STATUS_CHANGED'
                           ) {
@@ -1514,6 +1645,21 @@ const canCurrentUserReview =
                               <div className="mt-2 text-sm">
                                 <b>By:</b> {history.actor_name || 'System'}
                               </div>
+
+                              {eventType === 'EDITED' && (
+                                <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-200 bg-white/70 p-3">
+                                  <div className="text-sm text-emerald-900">
+                                    Task fields were modified.
+                                  </div>
+                                  <button
+                                    type="button"
+                                    className="btn !border-emerald-300 !bg-emerald-700/10 !text-emerald-800 hover:!bg-emerald-700/20 !px-3 !py-1.5 whitespace-nowrap"
+                                    onClick={() => setEditDetails(history)}
+                                  >
+                                    View Details
+                                  </button>
+                                </div>
+                              )}
 
                               {eventType === 'REVIEW' && (
                                 <div className="mt-1 text-sm">
@@ -1614,6 +1760,132 @@ const canCurrentUserReview =
         </div>
       ) : (
         !pageErr && <Empty />
+      )}
+
+      {/* =========================================================
+          EDIT HISTORY DETAILS MODAL
+      ========================================================= */}
+      {editDetails && (
+        <Modal
+          title="Task Edit Details"
+          onClose={() => setEditDetails(null)}
+        >
+          <div className="space-y-4">
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+              <div className="font-bold text-emerald-800">
+                Task Edited
+              </div>
+
+              <div className="mt-3 grid gap-2 text-sm sm:grid-cols-2">
+                <div>
+                  <b>Edited By:</b>{' '}
+                  {editDetails.actor_name || 'System'}
+                </div>
+
+                <div>
+                  <b>Role:</b>{' '}
+                  {editDetails.actor_role === 'SUPER_ADMIN'
+                    ? 'Super Admin'
+                    : editDetails.actor_role === 'TEAM_LEAD'
+                    ? 'Team Lead'
+                    : editDetails.actor_role === 'ADMIN'
+                    ? 'Admin'
+                    : editDetails.actor_role === 'EMPLOYEE'
+                    ? 'Employee'
+                    : editDetails.actor_role || 'System'}
+                </div>
+
+                <div className="sm:col-span-2">
+                  <b>Edited At:</b>{' '}
+                  {editDetails.event_at
+                    ? new Date(
+                        editDetails.event_at
+                      ).toLocaleString()
+                    : '—'}
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-4">
+              <div className="mb-3 font-bold text-navy">
+                What Changed
+              </div>
+
+              {editDetails.changes &&
+              typeof editDetails.changes === 'object' &&
+              Object.keys(editDetails.changes).length > 0 ? (
+                <div className="space-y-3">
+                  {Object.entries(editDetails.changes).map(
+                    ([field, change]: [string, any]) => {
+                      const oldValue =
+                        change?.oldValue === null ||
+                        change?.oldValue === undefined ||
+                        change?.oldValue === ''
+                          ? '—'
+                          : String(change.oldValue);
+
+                      const newValue =
+                        change?.newValue === null ||
+                        change?.newValue === undefined ||
+                        change?.newValue === ''
+                          ? '—'
+                          : String(change.newValue);
+
+                      return (
+                        <div
+                          key={field}
+                          className="rounded-lg border border-slate-200 bg-slate-50 p-3"
+                        >
+                          <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
+                            {change?.label || field}
+                          </div>
+
+                          <div className="mt-2 grid gap-2 sm:grid-cols-[1fr_auto_1fr] sm:items-center">
+                            <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-800">
+                              <div className="text-[10px] font-bold uppercase tracking-wide text-red-600">
+                                Previous
+                              </div>
+                              <div className="mt-1 whitespace-pre-wrap break-words">
+                                {oldValue}
+                              </div>
+                            </div>
+
+                            <div className="hidden text-lg font-bold text-slate-400 sm:block">
+                              →
+                            </div>
+
+                            <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-800">
+                              <div className="text-[10px] font-bold uppercase tracking-wide text-emerald-600">
+                                Updated
+                              </div>
+                              <div className="mt-1 whitespace-pre-wrap break-words">
+                                {newValue}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    }
+                  )}
+                </div>
+              ) : (
+                <div className="text-sm muted">
+                  No field-level changes were recorded.
+                </div>
+              )}
+            </div>
+
+            <div className="flex justify-end">
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => setEditDetails(null)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {/* =========================================================
