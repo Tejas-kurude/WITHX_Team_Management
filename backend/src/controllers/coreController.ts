@@ -2886,17 +2886,22 @@ export async function saveWorkHours(req: Request, res: Response) {
   if(!['DEFAULT','DEPARTMENT','TEAM','EMPLOYEE'].includes(scope)) return res.status(400).json({message:'Invalid work-hours scope.'});
   if(scope!=='DEFAULT' && (!Number.isInteger(scopeId)||scopeId<=0)) return res.status(400).json({message:'A valid target is required.'});
   if(!Number.isFinite(hours)||hours<=0||hours>24) return res.status(400).json({message:'Work hours must be greater than 0 and no more than 24 hours.'});
-  if(scope==='DEPARTMENT') { const x=await query<any>('SELECT 1 FROM departments WHERE id=$1',[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Department not found.'}); }
-  if(scope==='TEAM') { const x=await query<any>(`SELECT 1 FROM employees WHERE id=$1 AND EXISTS (SELECT 1 FROM users u WHERE u.employee_id=employees.id AND u.role='TEAM_LEAD')`,[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Team lead not found.'}); }
-  if(scope==='EMPLOYEE') { const x=await query<any>('SELECT 1 FROM employees WHERE id=$1',[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Employee not found.'}); }
+
+  // Non-default scopes have already been validated above, so narrow the
+  // nullable value for the database calls that require a numeric target.
+  const targetId = scopeId as number;
+
+  if(scope==='DEPARTMENT') { const x=await query<any>('SELECT 1 FROM departments WHERE id=$1',[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Department not found.'}); }
+  if(scope==='TEAM') { const x=await query<any>(`SELECT 1 FROM employees WHERE id=$1 AND EXISTS (SELECT 1 FROM users u WHERE u.employee_id=employees.id AND u.role='TEAM_LEAD')`,[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Team lead not found.'}); }
+  if(scope==='EMPLOYEE') { const x=await query<any>('SELECT 1 FROM employees WHERE id=$1',[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Employee not found.'}); }
   if(scope==='DEFAULT') {
     const r=await query<any>(`UPDATE work_hours_settings SET hours=$1,updated_at=now(),created_by=COALESCE(created_by,$2) WHERE scope='DEFAULT' RETURNING *`,[hours,req.user!.employeeId]);
     if(r.rows[0]) { await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0].id,{scope,hours}); return res.json(r.rows[0]); }
     const r2=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES('DEFAULT',NULL,$1,$2) RETURNING *`,[hours,req.user!.employeeId]);
     await audit(req.user?.userId,'CREATE','WORK_HOURS',r2.rows[0].id,{scope,hours}); return res.status(201).json(r2.rows[0]);
   }
-  const r=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES($1,$2,$3,$4) ON CONFLICT (scope,scope_id) WHERE scope <> 'DEFAULT' DO UPDATE SET hours=EXCLUDED.hours,updated_at=now() RETURNING *`,[scope,scopeId,hours,req.user!.employeeId]);
-  await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0]?.id||null,{scope,scopeId,hours});
+  const r=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES($1,$2,$3,$4) ON CONFLICT (scope,scope_id) WHERE scope <> 'DEFAULT' DO UPDATE SET hours=EXCLUDED.hours,updated_at=now() RETURNING *`,[scope,targetId,hours,req.user!.employeeId]);
+  await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0]?.id||null,{scope,scopeId:targetId,hours});
   res.json(r.rows[0]);
 }
 
