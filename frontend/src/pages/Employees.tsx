@@ -1,11 +1,12 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Eye, EyeOff } from 'lucide-react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
+import { useSearchParams } from 'react-router-dom';
 
 export default function Employees() {
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
 
   const isSuper = user?.role === 'SUPER_ADMIN';
   const canCreate =
@@ -18,14 +19,13 @@ export default function Employees() {
 
   const [deleteUser, setDeleteUser] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [visiblePasswords, setVisiblePasswords] = useState<Record<number, boolean>>({});
 
   const [err, setErr] = useState('');
   const [pageErr, setPageErr] = useState('');
 
-  const [q, setQ] = useState('');
-  const [department, setDepartment] = useState('');
-  const [userType, setUserType] = useState('');
+  const [q, setQ] = useState(() => searchParams.get('search') || '');
+  const [department, setDepartment] = useState(() => searchParams.get('department') || '');
+  const [userType, setUserType] = useState(() => searchParams.get('userType') || '');
 
   async function load() {
     try {
@@ -212,37 +212,6 @@ export default function Employees() {
                     <div className="text-xs muted">
                       {r.email}
                     </div>
-{isSuper && (
-                      <div className="mt-1 flex items-center gap-1 text-xs">
-                        <span className="muted">Password:</span>
-                        <span className="font-mono">
-                          {visiblePasswords[r.id]
-                            ? r.login_password || 'Not available'
-                            : '••••••••'}
-                        </span>
-                        <button
-                          type="button"
-                          className="rounded-md p-1 text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-                          title={
-                            visiblePasswords[r.id]
-                              ? 'Hide password'
-                              : 'Show password'
-                          }
-                          onClick={() =>
-                            setVisiblePasswords(v => ({
-                              ...v,
-                              [r.id]: !v[r.id],
-                            }))
-                          }
-                        >
-                          {visiblePasswords[r.id] ? (
-                            <EyeOff size={14} />
-                          ) : (
-                            <Eye size={14} />
-                          )}
-                        </button>
-                      </div>
-                    )}
                   </td>
 
                   <td>
@@ -513,40 +482,25 @@ export default function Employees() {
             </div>
 
             {editing ? (
-              <>
-                <div>
-                  <label className="label">
-                    Status
-                  </label>
+              <div>
 
-                  <select
-                    className="input mt-1"
-                    name="status"
-                    defaultValue={editing.status}
-                  >
-                    <option>ACTIVE</option>
-                    <option>INACTIVE</option>
-                  </select>
-                </div>
+                <label className="label">
+                  Status
+                </label>
 
-                {isSuper && (
-                  <div>
-                    <label className="label">
-                      New Password
-                    </label>
+                <select
+                  className="input mt-1"
+                  name="status"
+                  defaultValue={editing.status}
+                >
+                  <option>ACTIVE</option>
+                  <option>INACTIVE</option>
+                </select>
 
-                    <input
-                      className="input mt-1"
-                      name="password"
-                      type="password"
-                      minLength={8}
-                      placeholder="Leave blank to keep current password"
-                    />
-                  </div>
-                )}
-              </>
+              </div>
             ) : (
               <div>
+
                 <label className="label">
                   Joining Date
                 </label>

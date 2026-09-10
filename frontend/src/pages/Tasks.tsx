@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
+import { useSearchParams } from 'react-router-dom';
 
 const statuses = [
   'PENDING',
@@ -16,6 +17,7 @@ const statuses = [
 
 export default function Tasks() {
   const { user } = useAuth();
+  const [searchParams] = useSearchParams();
 
   const isSuper = user?.role === 'SUPER_ADMIN';
   const canAssign = user?.role !== 'EMPLOYEE';
@@ -51,14 +53,14 @@ const [deleting, setDeleting] = useState(false);
   const [assignmentType, setAssignmentType] =
     useState('INDIVIDUAL');
 
-  const [filters, setFilters] = useState<any>({
-    search: '',
-    status: '',
-    priority: '',
-    department: '',
-    employeeId: '',
-    date: '',
-  });
+  const [filters, setFilters] = useState<any>(() => ({
+    search: searchParams.get('search') || '',
+    status: searchParams.get('status') || '',
+    priority: searchParams.get('priority') || '',
+    department: searchParams.get('department') || '',
+    employeeId: searchParams.get('employeeId') || '',
+    date: searchParams.get('date') || '',
+  }));
 
   /* =========================================================
      LOAD TASKS

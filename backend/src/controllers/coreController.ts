@@ -105,14 +105,38 @@ export async function dashboard(req: Request, res: Response) {
   const params = team ? [emp] : [];
   const employeeWhere = team ? 'WHERE e.team_lead_id=$1' : 'WHERE 1=1';
   const joinTeam = team ? ' AND e.team_lead_id=$1' : '';
-  const [employees, attendance, tasks, depts, activities] = await Promise.all([
+  const [employees, attendance, tasks, depts, activities, presentToday] = await Promise.all([
     query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE e.status='ACTIVE')::int active,count(*) FILTER(WHERE e.user_type='INTERN')::int interns,count(*) FILTER(WHERE e.user_type='EMPLOYEE')::int employees FROM employees e ${employeeWhere}`, params),
     query<any>(`SELECT count(*) FILTER(WHERE a.status IN('PRESENT','LATE'))::int present,count(*) FILTER(WHERE a.status='LATE')::int late,count(*) FILTER(WHERE a.status='LEAVE')::int leave FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE a.work_date=current_date ${joinTeam}`, params),
     query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE t.status='COMPLETED')::int completed,count(*) FILTER(WHERE t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED'))::int overdue,count(*) FILTER(WHERE t.status='PENDING')::int pending FROM tasks t JOIN employees e ON e.id=t.assigned_to WHERE 1=1 ${joinTeam}`, params),
     team ? query<any>(`SELECT count(DISTINCT department_id)::int total FROM employees WHERE team_lead_id=$1 AND department_id IS NOT NULL`, [emp]) : query<any>('SELECT count(*)::int total FROM departments'),
-    isAdmin(role) ? query<any>('SELECT al.id,al.action,al.entity_type,al.created_at,u.email FROM activity_logs al LEFT JOIN users u ON u.id=al.user_id ORDER BY al.created_at DESC LIMIT 8') : Promise.resolve({ rows: [] } as any)
+    isAdmin(role) ? query<any>('SELECT al.id,al.action,al.entity_type,al.created_at,u.email FROM activity_logs al LEFT JOIN users u ON u.id=al.user_id ORDER BY al.created_at DESC LIMIT 8') : Promise.resolve({ rows: [] } as any),
+    query<any>(`
+      SELECT
+        e.id,
+        e.employee_code,
+        e.first_name || ' ' || e.last_name AS employee_name,
+        e.user_type,
+        a.status,
+        a.check_in,
+        a.check_out
+      FROM attendance a
+      JOIN employees e ON e.id = a.employee_id
+      WHERE a.work_date = current_date
+        AND a.status IN ('PRESENT','LATE')
+        ${joinTeam}
+      ORDER BY e.first_name, e.last_name
+    `, params)
   ]);
-  res.json({ scope: role.toLowerCase(), employees: employees.rows[0], attendance: attendance.rows[0], tasks: tasks.rows[0], departments: depts.rows[0], recentActivity: activities.rows });
+  res.json({
+    scope: role.toLowerCase(),
+    employees: employees.rows[0],
+    attendance: attendance.rows[0],
+    tasks: tasks.rows[0],
+    departments: depts.rows[0],
+    recentActivity: activities.rows,
+    presentToday: presentToday.rows
+  });
 }
 
 export async function listDepartments(req: Request, res: Response) {
@@ -242,6 +266,34 @@ export async function deleteEmployee(req: Request, res: Response) {
   res.json({ ok: true });
 }
 
+function normalizeTaskEditValue(value: any) {
+  if (value === undefined || value === null || value === '') return null;
+  return value;
+}
+
+function buildTaskEditChanges(before: any, after: any) {
+  const fields: Array<[string, string]> = [
+    ['title', 'Title'],
+    ['description', 'Description'],
+    ['assigned_to', 'Assigned To'],
+    ['priority', 'Priority'],
+    ['start_date', 'Start Date'],
+    ['due_date', 'End Date'],
+    ['status', 'Status'],
+    ['progress', 'Progress'],
+    ['attachment_url', 'Attachment'],
+  ];
+  const changes: Record<string, { label: string; oldValue: any; newValue: any }> = {};
+  for (const [field, label] of fields) {
+    const oldValue = normalizeTaskEditValue(before?.[field]);
+    const newValue = normalizeTaskEditValue(after?.[field]);
+    if (JSON.stringify(oldValue) !== JSON.stringify(newValue)) {
+      changes[field] = { label, oldValue, newValue };
+    }
+  }
+  return changes;
+}
+
 export async function listTasks(req: Request, res: Response) {
   await syncDeadlineNotifications(req.user!.role === 'EMPLOYEE' ? req.user!.employeeId : null);
   const { search = '', status = '', priority = '', department = '', employeeId = '', teamLeadId = '', date = '' } = req.query as any;
@@ -278,6 +330,10 @@ const r = await query<any>(
     tl.first_name || ' ' || tl.last_name AS team_lead_name,
 
     c.first_name || ' ' || c.last_name AS creator_name,
+
+    latest_edit.edited_at AS latest_edit_at,
+    latest_edit.editor_name AS latest_edit_by,
+    (latest_edit.id IS NOT NULL) AS is_edited,
 
     /*
      * =====================================================
@@ -618,6 +674,16 @@ CASE
   LEFT JOIN employees c
     ON c.id = t.created_by
 
+  LEFT JOIN LATERAL (
+    SELECT teh.id, teh.edited_at,
+           COALESCE(editor.first_name || ' ' || editor.last_name, 'System') AS editor_name
+    FROM task_edit_history teh
+    LEFT JOIN employees editor ON editor.id = teh.edited_by
+    WHERE teh.task_id = t.id
+    ORDER BY teh.edited_at DESC, teh.id DESC
+    LIMIT 1
+  ) latest_edit ON true
+
   /*
    * =====================================================
    * LATEST SUBMISSION
@@ -679,7 +745,7 @@ CASE
   ${w}
 
   ORDER BY
-    t.created_at DESC
+    GREATEST(t.created_at, COALESCE(latest_edit.edited_at, t.created_at)) DESC
   `,
 
   [
@@ -883,6 +949,14 @@ export async function updateTask(req: Request, res: Response) {
           newStatus,
           req.user!.employeeId
         ]
+      );
+    }
+
+    const editChanges = buildTaskEditChanges(task, r.rows[0]);
+    if (Object.keys(editChanges).length) {
+      await client.query(
+        `INSERT INTO task_edit_history(task_id,edited_by,changes) VALUES($1,$2,$3::jsonb)`,
+        [id, req.user!.employeeId, JSON.stringify(editChanges)]
       );
     }
 
@@ -2373,7 +2447,8 @@ export async function taskReviewHistory(
         NULL::text AS proof_type,
         NULL::text AS proof_url,
         NULL::text AS completion_summary,
-        NULL::integer AS submission_number
+        NULL::integer AS submission_number,
+        NULL::jsonb AS changes
       FROM tasks t
       LEFT JOIN employees creator
         ON creator.id = t.created_by
@@ -2402,7 +2477,8 @@ export async function taskReviewHistory(
         NULL::text AS proof_type,
         NULL::text AS proof_url,
         NULL::text AS completion_summary,
-        NULL::integer AS submission_number
+        NULL::integer AS submission_number,
+        NULL::jsonb AS changes
       FROM task_status_history tsh
       LEFT JOIN employees actor
         ON actor.id = tsh.changed_by
@@ -2436,7 +2512,8 @@ export async function taskReviewHistory(
         ROW_NUMBER() OVER (
           PARTITION BY cs.task_id
           ORDER BY cs.submitted_at ASC, cs.id ASC
-        )::integer AS submission_number
+        )::integer AS submission_number,
+        NULL::jsonb AS changes
       FROM task_completion_submissions cs
       LEFT JOIN employees submitter
         ON submitter.id = cs.submitted_by
@@ -2467,12 +2544,40 @@ export async function taskReviewHistory(
         NULL::text AS proof_type,
         NULL::text AS proof_url,
         NULL::text AS completion_summary,
-        NULL::integer AS submission_number
+        NULL::integer AS submission_number,
+        NULL::jsonb AS changes
       FROM task_reviews tr
       LEFT JOIN employees reviewer
         ON reviewer.id = tr.reviewer_id
       WHERE tr.task_id = $1::integer
         AND tr.reviewed_at IS NOT NULL
+
+      UNION ALL
+
+      /* -------------------------------------------------
+       * TASK EDITS
+       * ------------------------------------------------- */
+      SELECT
+        'EDITED'::varchar AS event_type,
+        teh.edited_at AS event_at,
+        teh.edited_by::integer AS actor_id,
+        COALESCE(editor.first_name || ' ' || editor.last_name, 'System') AS actor_name,
+        COALESCE(u.role, 'SYSTEM')::varchar AS actor_role,
+        NULL::integer AS submission_id,
+        NULL::integer AS review_id,
+        NULL::varchar AS decision,
+        NULL::varchar AS old_status,
+        NULL::varchar AS new_status,
+        'Task details edited'::text AS comment,
+        NULL::text AS proof_type,
+        NULL::text AS proof_url,
+        NULL::text AS completion_summary,
+        NULL::integer AS submission_number,
+        teh.changes::jsonb AS changes
+      FROM task_edit_history teh
+      LEFT JOIN employees editor ON editor.id = teh.edited_by
+      LEFT JOIN users u ON u.employee_id = teh.edited_by
+      WHERE teh.task_id = $1::integer
     ) history
     ORDER BY
       history.event_at ASC NULLS LAST,
@@ -2503,12 +2608,41 @@ export async function taskReviewHistory(
 
 export async function adminUpdateTask(req: Request, res: Response) {
   const id = Number(req.params.id), b = req.body;
+  const beforeResult = await query<any>('SELECT * FROM tasks WHERE id=$1', [id]);
+  if (!beforeResult.rows[0]) return res.status(404).json({ message: 'Task not found' });
+  const before = beforeResult.rows[0];
+
   const assignedTo = numOrNull(b.assignedTo);
-  const r = await query<any>(`UPDATE tasks SET title=COALESCE($1,title),description=$2,assigned_to=COALESCE($3,assigned_to),priority=COALESCE($4,priority),start_date=$5,due_date=$6,status=COALESCE($7,status),progress=COALESCE($8,progress),attachment_url=$9,completed_at=CASE WHEN COALESCE($7,status)='COMPLETED' THEN COALESCE(completed_at,now()) ELSE NULL END,updated_at=now() WHERE id=$10 RETURNING *`, [b.title || null, textOrNull(b.description), assignedTo, b.priority || null, b.startDate || null, b.dueDate || null, b.status || null, b.progress === '' || b.progress === undefined ? null : Number(b.progress), textOrNull(b.attachmentUrl), id]);
-  if (!r.rows[0]) return res.status(404).json({ message: 'Task not found' });
-  await query(`INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_UPDATED','Task updated',$2,'TASK',$3)`, [r.rows[0].assigned_to, r.rows[0].title, String(id)]);
-  await audit(req.user?.userId, 'UPDATE', 'TASK', id, b);
-  res.json(r.rows[0]);
+  const r = await query<any>(
+    `UPDATE tasks SET title=COALESCE($1,title),description=$2,assigned_to=COALESCE($3,assigned_to),priority=COALESCE($4,priority),start_date=$5,due_date=$6,status=COALESCE($7,status),progress=COALESCE($8,progress),attachment_url=$9,completed_at=CASE WHEN COALESCE($7,status)='COMPLETED' THEN COALESCE(completed_at,now()) ELSE NULL END,updated_at=now() WHERE id=$10 RETURNING *`,
+    [b.title || null, textOrNull(b.description), assignedTo, b.priority || null, b.startDate || null, b.dueDate || null, b.status || null, b.progress === '' || b.progress === undefined ? null : Number(b.progress), textOrNull(b.attachmentUrl), id]
+  );
+  const after = r.rows[0];
+
+  const changes = buildTaskEditChanges(before, after);
+  if (Object.keys(changes).length) {
+    await query(
+      `INSERT INTO task_edit_history(task_id,edited_by,changes) VALUES($1,$2,$3::jsonb)`,
+      [id, req.user!.employeeId, JSON.stringify(changes)]
+    );
+  }
+
+  if (before.status !== after.status) {
+    await query(
+      `INSERT INTO task_status_history(task_id,old_status,new_status,changed_by,reason) VALUES($1,$2,$3,$4,$5)`,
+      [id, before.status, after.status, req.user!.employeeId, 'Task edited.']
+    );
+  }
+
+  if (Object.keys(changes).length && after.assigned_to) {
+    await query(
+      `INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_UPDATED','Task updated',$2,'TASK',$3)`,
+      [after.assigned_to, after.title, String(id)]
+    );
+  }
+
+  await audit(req.user?.userId, 'UPDATE', 'TASK', id, { ...b, changes });
+  res.json(after);
 }
 export async function deleteTask(req: Request, res: Response) {
   const id = Number(req.params.id); const r = await query<any>('DELETE FROM tasks WHERE id=$1 RETURNING id,title', [id]);
@@ -2558,14 +2692,16 @@ export async function checkOut(req: Request, res: Response) {
   await audit(req.user?.userId, 'CHECK_OUT', 'ATTENDANCE', r.rows[0].id, { mode: cur.rows[0].attendance_mode }); res.json(r.rows[0]);
 }
 export async function listAttendance(req: Request, res: Response) {
-  const { month = '', department = '', employeeId = '', mode = '', search = '' } = req.query as any;
+  const { month = '', date = '', department = '', employeeId = '', mode = '', status = '', search = '' } = req.query as any;
   const p: any[] = []; let w = 'WHERE 1=1';
   if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND a.employee_id=$${p.length}`; }
   else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND e.team_lead_id=$${p.length}`; }
   if (month) { p.push(month + '-01'); w += ` AND a.work_date>=date_trunc('month',$${p.length}::date) AND a.work_date<(date_trunc('month',$${p.length}::date)+interval '1 month')`; }
+  if (date) { p.push(date); w += ` AND a.work_date=$${p.length}::date`; }
   if (department) { p.push(Number(department)); w += ` AND e.department_id=$${p.length}`; }
   if (employeeId) { p.push(Number(employeeId)); w += ` AND e.id=$${p.length}`; }
   if (mode) { p.push(mode); w += ` AND a.attendance_mode=$${p.length}`; }
+  if (status) { p.push(status); w += ` AND a.status=$${p.length}`; }
   if (search) { p.push(`%${search}%`); w += ` AND (e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length} OR e.employee_code ILIKE $${p.length} OR COALESCE(d.name,'') ILIKE $${p.length} OR a.attendance_mode ILIKE $${p.length} OR a.status ILIKE $${p.length})`; }
   const r = await query<any>(`SELECT a.*,e.employee_code,e.user_type,e.first_name||' '||e.last_name employee_name,u.id user_id,d.name department_name FROM attendance a JOIN employees e ON e.id=a.employee_id LEFT JOIN users u ON u.employee_id=e.id LEFT JOIN departments d ON d.id=e.department_id ${w} ORDER BY a.work_date DESC,a.check_in DESC LIMIT 500`, p); res.json(r.rows);
 }
@@ -2703,6 +2839,75 @@ export async function decideLeave(req: Request, res: Response) {
 export async function updateLeaveRequest(req: Request, res: Response) { const id = Number(req.params.id); const { type, startDate, endDate, reason } = req.body; const r = await query<any>('UPDATE leave_requests SET leave_type=COALESCE($1,leave_type),start_date=COALESCE($2::date,start_date),end_date=COALESCE($3::date,end_date),reason=COALESCE($4,reason) WHERE id=$5 RETURNING *', [type || null, startDate || null, endDate || null, reason || null, id]); if (!r.rows[0]) return res.status(404).json({ message: 'Leave request not found' }); await audit(req.user?.userId, 'UPDATE', 'LEAVE', id, req.body); res.json(r.rows[0]); }
 export async function deleteLeave(req: Request, res: Response) { const id = Number(req.params.id); const r = await query<any>('DELETE FROM leave_requests WHERE id=$1 RETURNING id', [id]); if (!r.rows[0]) return res.status(404).json({ message: 'Leave request not found' }); await audit(req.user?.userId, 'DELETE', 'LEAVE', id); res.json({ ok: true }); }
 
+/* =========================================================
+   WORK HOURS CONFIGURATION
+   Priority: INDIVIDUAL > TEAM > DEPARTMENT > DEFAULT
+   ========================================================= */
+
+async function getEffectiveWorkHours(employeeId: number) {
+  const r = await query<any>(`
+    SELECT COALESCE(
+      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      3
+    )::numeric AS hours
+    FROM employees e
+    WHERE e.id=$1
+  `, [employeeId]);
+  const hours = Number(r.rows[0]?.hours);
+  return Number.isFinite(hours) && hours > 0 ? hours : 3;
+}
+
+export async function listWorkHours(req: Request, res: Response) {
+  const r = await query<any>(`
+    SELECT wh.*,
+      CASE
+        WHEN wh.scope='DEFAULT' THEN 'Default'
+        WHEN wh.scope='DEPARTMENT' THEN COALESCE(d.name,'Department')
+        WHEN wh.scope='TEAM' THEN COALESCE(tl.first_name||' '||tl.last_name,'Team')
+        WHEN wh.scope='EMPLOYEE' THEN COALESCE(e.first_name||' '||e.last_name,'Employee')
+        ELSE wh.scope
+      END AS target_name
+    FROM work_hours_settings wh
+    LEFT JOIN departments d ON wh.scope='DEPARTMENT' AND d.id=wh.scope_id
+    LEFT JOIN employees tl ON wh.scope='TEAM' AND tl.id=wh.scope_id
+    LEFT JOIN employees e ON wh.scope='EMPLOYEE' AND e.id=wh.scope_id
+    ORDER BY CASE wh.scope WHEN 'DEFAULT' THEN 1 WHEN 'DEPARTMENT' THEN 2 WHEN 'TEAM' THEN 3 WHEN 'EMPLOYEE' THEN 4 ELSE 5 END, target_name
+  `);
+  res.json(r.rows);
+}
+
+export async function saveWorkHours(req: Request, res: Response) {
+  const scope=String(req.body.scope||'').toUpperCase();
+  const scopeId=req.body.scopeId===''||req.body.scopeId===null||req.body.scopeId===undefined?null:Number(req.body.scopeId);
+  const hours=Number(req.body.hours);
+  if(!['DEFAULT','DEPARTMENT','TEAM','EMPLOYEE'].includes(scope)) return res.status(400).json({message:'Invalid work-hours scope.'});
+  if(scope!=='DEFAULT' && (!Number.isInteger(scopeId)||scopeId<=0)) return res.status(400).json({message:'A valid target is required.'});
+  if(!Number.isFinite(hours)||hours<=0||hours>24) return res.status(400).json({message:'Work hours must be greater than 0 and no more than 24 hours.'});
+  if(scope==='DEPARTMENT') { const x=await query<any>('SELECT 1 FROM departments WHERE id=$1',[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Department not found.'}); }
+  if(scope==='TEAM') { const x=await query<any>(`SELECT 1 FROM employees WHERE id=$1 AND EXISTS (SELECT 1 FROM users u WHERE u.employee_id=employees.id AND u.role='TEAM_LEAD')`,[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Team lead not found.'}); }
+  if(scope==='EMPLOYEE') { const x=await query<any>('SELECT 1 FROM employees WHERE id=$1',[scopeId]); if(!x.rows[0]) return res.status(404).json({message:'Employee not found.'}); }
+  if(scope==='DEFAULT') {
+    const r=await query<any>(`UPDATE work_hours_settings SET hours=$1,updated_at=now(),created_by=COALESCE(created_by,$2) WHERE scope='DEFAULT' RETURNING *`,[hours,req.user!.employeeId]);
+    if(r.rows[0]) { await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0].id,{scope,hours}); return res.json(r.rows[0]); }
+    const r2=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES('DEFAULT',NULL,$1,$2) RETURNING *`,[hours,req.user!.employeeId]);
+    await audit(req.user?.userId,'CREATE','WORK_HOURS',r2.rows[0].id,{scope,hours}); return res.status(201).json(r2.rows[0]);
+  }
+  const r=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES($1,$2,$3,$4) ON CONFLICT (scope,scope_id) WHERE scope <> 'DEFAULT' DO UPDATE SET hours=EXCLUDED.hours,updated_at=now() RETURNING *`,[scope,scopeId,hours,req.user!.employeeId]);
+  await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0]?.id||null,{scope,scopeId,hours});
+  res.json(r.rows[0]);
+}
+
+export async function deleteWorkHours(req: Request, res: Response) {
+  const id=Number(req.params.id);
+  const r=await query<any>(`DELETE FROM work_hours_settings WHERE id=$1 AND scope <> 'DEFAULT' RETURNING *`,[id]);
+  if(!r.rows[0]) return res.status(404).json({message:'Work-hours override not found.'});
+  await audit(req.user?.userId,'DELETE','WORK_HOURS',id,{scope:r.rows[0].scope,scopeId:r.rows[0].scope_id});
+  res.json({ok:true});
+}
+
 export async function performance(req: Request, res: Response) {
   const requestedEmployeeId = Number(req.query.employeeId || 0);
   let targets: number[] = [];
@@ -2730,13 +2935,9 @@ export async function performance(req: Request, res: Response) {
     return Number.isFinite(n) ? n : fallback;
   };
 
-  const setting = await query<any>(`SELECT value FROM system_settings WHERE key='minimum_work_minutes'`);
-  const configuredMinutes = safeNumber(setting.rows[0]?.value, 180);
-  const minimumWorkMinutes = Math.max(1, configuredMinutes);
-  const minimumWorkHours = minimumWorkMinutes / 60;
-
   const calculated: any[] = [];
   for (const target of targets) {
+    const minimumWorkHours = await getEffectiveWorkHours(target);
     const { rows } = await query<any>(`
       WITH task AS (
         SELECT count(*) FILTER(WHERE status <> 'CANCELLED') task_total,
@@ -2787,8 +2988,20 @@ export async function performance(req: Request, res: Response) {
     start.setDate(start.getDate() - 29);
 
     const r = await query<any>(`
-      INSERT INTO performance_scores(employee_id,period_start,period_end,task_completion,on_time,attendance,punctuality,report_consistency,working_hours,score)
-      VALUES($1,$2,current_date,$3,$4,$5,0,0,$6,$7) RETURNING *`,
+      INSERT INTO performance_scores(
+        employee_id,
+        period_start,
+        period_end,
+        task_completion,
+        on_time,
+        attendance,
+        punctuality,
+        report_consistency,
+        working_hours,
+        required_work_hours,
+        score
+      )
+      VALUES($1,$2,current_date,$3,$4,$5,0,0,$6,$7,$8) RETURNING *`,
       [
         target,
         start.toISOString().slice(0, 10),
@@ -2796,6 +3009,7 @@ export async function performance(req: Request, res: Response) {
         Math.max(0, Math.min(100, safeNumber(onTime, 100))),
         Math.max(0, Math.min(100, safeNumber(attendance, 100))),
         workingHours,
+        minimumWorkHours,
         score,
       ]);
 
@@ -2812,32 +3026,22 @@ export async function performance(req: Request, res: Response) {
 export async function performanceList(req: Request, res: Response) {
   const p: any[] = [];
   let w = 'WHERE 1=1';
-  if (req.user!.role === 'EMPLOYEE') {
-    p.push(req.user!.employeeId);
-    w += ` AND p.employee_id=$${p.length}`;
-  } else if (req.user!.role === 'TEAM_LEAD') {
-    p.push(req.user!.employeeId);
-    w += ` AND e.team_lead_id=$${p.length}`;
-  }
-
+  if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND p.employee_id=$${p.length}`; }
+  else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND e.team_lead_id=$${p.length}`; }
   const r = await query<any>(`
     SELECT DISTINCT ON(p.employee_id)
-      p.*,
-      e.employee_code,
-      e.user_type,
+      p.*, e.employee_code, e.user_type,
       e.first_name||' '||e.last_name employee_name,
       d.name department_name,
-      CASE WHEN p.score = 'NaN'::numeric THEN 0 ELSE COALESCE(p.score, 0) END::numeric AS safe_score
+      CASE WHEN p.score='NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END::numeric AS safe_score,
+      COALESCE(p.required_work_hours,3)::numeric AS required_work_hours
     FROM performance_scores p
     JOIN employees e ON e.id=p.employee_id
     LEFT JOIN departments d ON d.id=e.department_id
     ${w}
-    ORDER BY p.employee_id,p.period_end DESC,p.created_at DESC`, p);
-
-  res.json(r.rows.map((row: any) => ({
-    ...row,
-    score: Number.isFinite(Number(row.safe_score)) ? Math.max(0, Math.min(100, Number(row.safe_score))) : 0,
-  })));
+    ORDER BY p.employee_id,p.period_end DESC,p.created_at DESC
+  `, p);
+  res.json(r.rows.map((row:any)=>({...row,score:Number.isFinite(Number(row.safe_score))?Math.max(0,Math.min(100,Number(row.safe_score))):0})));
 }
 
 export async function notifications(req: Request, res: Response) {
@@ -2889,7 +3093,7 @@ export async function exportCsv(req: Request, res: Response) {
   if (kind === 'employees') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name,e.last_name,e.email,e.phone,e.job_title,d.name department,e.joining_date,e.status FROM employees e LEFT JOIN departments d ON d.id=e.department_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY e.employee_code`, team ? [emp] : [])).rows;
   else if (kind === 'attendance') rows = (await query<any>(`SELECT a.work_date,e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,d.name department,a.status,a.attendance_mode,a.check_in,a.check_out,a.total_hours,a.location_text,a.location_verified FROM attendance a JOIN employees e ON e.id=a.employee_id LEFT JOIN departments d ON d.id=e.department_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY a.work_date DESC`, team ? [emp] : [])).rows;
   else if (kind === 'tasks') rows = (await query<any>(`SELECT t.id,t.title,e.employee_code,e.user_type,e.first_name||' '||e.last_name assignee,d.name department,t.assignment_scope,t.priority,CASE WHEN t.due_date<now() AND t.status NOT IN('COMPLETED','CANCELLED') THEN 'OVERDUE' ELSE t.status END status,t.progress,t.start_date,t.due_date,t.completed_at,c.first_name||' '||c.last_name uploaded_by FROM tasks t JOIN employees e ON e.id=t.assigned_to LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees c ON c.id=t.created_by ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY t.created_at DESC`, team ? [emp] : [])).rows;
-  else if (kind === 'performance') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,p.period_start,p.period_end,p.task_completion,p.on_time,p.attendance,p.working_hours,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY p.period_end DESC`, team ? [emp] : [])).rows;
+  else if (kind === 'performance') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,p.period_start,p.period_end,p.task_completion,p.on_time,p.attendance,p.working_hours,p.required_work_hours,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY p.period_end DESC,p.created_at DESC`, team ? [emp] : [])).rows;
   else return res.status(400).json({ message: 'Unknown export type' });
   const escape = (v: any) => `"${String(v ?? '').replaceAll('"', '""')}"`; const headers = rows[0] ? Object.keys(rows[0]) : []; const csv = [headers.map(escape).join(','), ...rows.map(row => headers.map(h => escape(row[h])).join(','))].join('\n');
   res.setHeader('Content-Type', 'text/csv'); res.setHeader('Content-Disposition', `attachment; filename=withx-${kind}.csv`); res.send(csv);

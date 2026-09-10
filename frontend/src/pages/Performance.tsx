@@ -184,6 +184,10 @@ export default function Performance() {
               ['Working hours', r.working_hours],
             ];
 
+            const requiredWorkHours = Number.isFinite(Number(r.required_work_hours))
+              ? Number(r.required_work_hours)
+              : 3;
+
             return (
               <div
                 key={r.id}
@@ -350,8 +354,15 @@ export default function Performance() {
                       `
                   }
                 >
-                  Working-hours score reaches 100% at the configured minimum
-                  (default 3 hours/day) and is capped there.
+                  <div className="flex items-center justify-between gap-3">
+                    <span>Required work hours</span>
+                    <b className={isSelected ? 'text-cyan-700' : 'text-black'}>
+                      {requiredWorkHours.toFixed(2)} hrs/day
+                    </b>
+                  </div>
+                  <div className="mt-1">
+                    Working-hours score was calculated using this required-hours target and is capped at 100%.
+                  </div>
                 </div>
               </div>
             );
