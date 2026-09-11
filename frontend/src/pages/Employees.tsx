@@ -15,6 +15,7 @@ export default function Employees() {
   const [rows, setRows] = useState<any[]>([]);
   const [deps, setDeps] = useState<any[]>([]);
   const [admins, setAdmins] = useState<any[]>([]);
+  const [visiblePasswords, setVisiblePasswords] = useState<Record<number, boolean>>({});
   const [selectedRole, setSelectedRole] = useState('EMPLOYEE');
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
@@ -221,6 +222,49 @@ export default function Employees() {
                     <div className="text-xs muted">
                       {r.email}
                     </div>
+
+                    {isSuper && (
+                      <div className="mt-1 flex items-center gap-2 text-xs muted">
+                        <span>
+                          Password: {visiblePasswords[r.id] ? (r.login_password || '—') : '••••••••'}
+                        </span>
+                        <button
+                          type="button"
+                          className="inline-flex items-center justify-center rounded p-1 hover:bg-slate-100"
+                          onClick={() =>
+                            setVisiblePasswords(prev => ({
+                              ...prev,
+                              [r.id]: !prev[r.id],
+                            }))
+                          }
+                          aria-label={visiblePasswords[r.id] ? 'Hide password' : 'Show password'}
+                          title={visiblePasswords[r.id] ? 'Hide password' : 'Show password'}
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 24 24"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            className="h-4 w-4"
+                          >
+                            {visiblePasswords[r.id] ? (
+                              <>
+                                <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" />
+                                <circle cx="12" cy="12" r="3" />
+                              </>
+                            ) : (
+                              <>
+                                <path d="M3 3l18 18" />
+                                <path d="M10.6 10.6a2 2 0 0 0 2.8 2.8" />
+                                <path d="M9.9 4.3A10.8 10.8 0 0 1 12 4c6.5 0 10 8 10 8a19.2 19.2 0 0 1-3.1 4.1" />
+                                <path d="M6.1 6.1C3.4 8.1 2 12 2 12s3.5 8 10 8a10.7 10.7 0 0 0 4.1-.8" />
+                              </>
+                            )}
+                          </svg>
+                        </button>
+                      </div>
+                    )}
                   </td>
 
                   <td>
@@ -440,6 +484,21 @@ export default function Employees() {
                     </>
                   )}
                 </select>
+              </div>
+            )}
+
+            {editing && isSuper && (
+              <div>
+                <label className="label">
+                  New Password
+                </label>
+                <input
+                  className="input mt-1"
+                  name="password"
+                  type="password"
+                  minLength={8}
+                  placeholder="Leave blank to keep current password"
+                />
               </div>
             )}
 

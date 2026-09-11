@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, PageTitle } from '../components/UI';
+import { useAuth } from '../context/AuthContext';
 
 const scopeLabels: Record<string, string> = {
   DEFAULT: 'Default',
@@ -12,6 +13,9 @@ const scopeLabels: Record<string, string> = {
 const scopePriority = ['DEFAULT', 'DEPARTMENT', 'TEAM', 'EMPLOYEE'];
 
 export default function WorkHours() {
+  const { user } = useAuth();
+  const isSuper = user?.role === 'SUPER_ADMIN';
+
   const [rows, setRows] = useState<any[]>([]);
   const [employees, setEmployees] = useState<any[]>([]);
   const [departments, setDepartments] = useState<any[]>([]);
@@ -40,8 +44,10 @@ export default function WorkHours() {
   }
 
   useEffect(() => {
-    void load();
-  }, []);
+    if (isSuper) {
+      void load();
+    }
+  }, [isSuper]);
 
   const teamLeads = useMemo(
     () => employees.filter((e) => e.role === 'TEAM_LEAD'),
@@ -58,7 +64,7 @@ export default function WorkHours() {
   function editRow(row: any) {
     setScope(row.scope);
     setScopeId(row.scope === 'DEFAULT' ? '' : String(row.scope_id ?? ''));
-    setHours(String(row.hours ?? '3'));
+    setHours(String(row.current_hours ?? row.hours ?? '3'));
     setEditingId(Number(row.id));
     setMsg('');
     setErr('');
@@ -121,6 +127,15 @@ export default function WorkHours() {
     if (sa !== sb) return sa - sb;
     return String(a.target_name || '').localeCompare(String(b.target_name || ''));
   });
+
+  if (!isSuper) {
+    return (
+      <div className="card p-6">
+        <h2 className="text-lg font-extrabold text-navy">Access Restricted</h2>
+        <p className="mt-1 text-sm muted">Only Super Admin can access Work Hours settings.</p>
+      </div>
+    );
+  }
 
   return (
     <>
@@ -199,7 +214,7 @@ export default function WorkHours() {
               <p className="mt-1 text-sm muted">Priority: Individual → Team → Department → Default.</p>
             </div>
             <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-bold text-slate-700">
-              Default: {Number(rows.find((r) => r.scope === 'DEFAULT')?.hours ?? 3).toFixed(2)} hrs/day
+              Default: {Number(rows.find((r) => r.scope === 'DEFAULT')?.current_hours ?? rows.find((r) => r.scope === 'DEFAULT')?.hours ?? 3).toFixed(2)} hrs/day
             </div>
           </div>
 
@@ -222,7 +237,7 @@ export default function WorkHours() {
                         <div className="font-semibold text-slate-800">{row.target_name}</div>
                         {row.scope === 'DEFAULT' && <div className="text-xs muted">Fallback for everyone without an override</div>}
                       </td>
-                      <td className="px-3 py-3 font-extrabold text-cyan-700">{Number(row.hours).toFixed(2)} hrs/day</td>
+                      <td className="px-3 py-3 font-extrabold text-cyan-700">{Number(row.current_hours ?? row.hours).toFixed(2)} hrs/day</td>
                       <td className="px-3 py-3 text-right">
                         <div className="flex justify-end gap-2">
                           <button type="button" className="btn !px-3 !py-1.5" onClick={() => editRow(row)}>Edit</button>

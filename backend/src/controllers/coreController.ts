@@ -367,6 +367,7 @@ function buildTaskEditChanges(before: any, after: any) {
     ['description', 'Description'],
     ['assigned_to', 'Assigned To'],
     ['priority', 'Priority'],
+    ['task_type', 'Task Type'],
     ['start_date', 'Start Date'],
     ['due_date', 'End Date'],
     ['status', 'Status'],
@@ -857,7 +858,7 @@ CASE
 res.json(r.rows);
 }
 export async function createTask(req: Request, res: Response) {
-  const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl } = req.body;
+  const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl, taskType = 'TECHNICAL' } = req.body;
 if (!title || !String(title).trim()) {
   return res.status(400).json({
     message: 'Task title is required.'
@@ -869,6 +870,8 @@ if (String(title).trim().length > 500) {
     message: 'Task title must be 500 characters or less. Put additional details in the description.'
   });
 }  const type = String(assignmentType).toUpperCase();
+  const normalizedTaskType = String(taskType || 'TECHNICAL').toUpperCase();
+  if (!['TECHNICAL', 'NON_TECHNICAL'].includes(normalizedTaskType)) return res.status(400).json({ message: 'Invalid task type.' });
   if (!['INDIVIDUAL', 'MULTIPLE', 'TEAM', 'DEPARTMENT', 'ADMIN'].includes(type)) return res.status(400).json({ message: 'Invalid assignment type.' });
   let ids: number[] = [];
   let scopeRef: number | null = null;
@@ -878,16 +881,28 @@ if (String(title).trim().length > 500) {
     if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
       return res.status(403).json({ message: 'Only Admins and Super Admin can create Admin-assigned tasks.' });
     }
+
+    const adminId = Number(assignedTo);
+    if (!adminId) {
+      return res.status(400).json({ message: 'Select an Admin.' });
+    }
+
     const rr = await query<any>(`
       SELECT e.id
       FROM employees e
       JOIN users u ON u.employee_id=e.id
-      WHERE u.role='ADMIN'
+      WHERE e.id=$1
+        AND u.role='ADMIN'
         AND u.is_active=true
         AND e.status='ACTIVE'
-      ORDER BY e.first_name,e.last_name,e.id
-    `);
-    ids = rr.rows.map(x => x.id);
+      LIMIT 1
+    `, [adminId]);
+
+    if (!rr.rows[0]) {
+      return res.status(400).json({ message: 'Selected Admin is not a valid active Admin account.' });
+    }
+
+    ids = [adminId];
   }
   if (type === 'TEAM') {
     scopeRef = req.user!.role === 'TEAM_LEAD' ? req.user!.employeeId : Number(teamLeadId);
@@ -911,7 +926,7 @@ if (String(title).trim().length > 500) {
   try {
     await client.query('BEGIN');
     for (const id of ids) {
-      const r = await client.query<any>(`INSERT INTO tasks(assignment_batch_id,assignment_scope,scope_ref_id,title,description,assigned_to,created_by,priority,start_date,due_date,attachment_url) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [batchId, type, scopeRef, title, textOrNull(description), id, req.user!.employeeId, priority, startDate || null, dueDate || null, textOrNull(attachmentUrl)]);
+      const r = await client.query<any>(`INSERT INTO tasks(assignment_batch_id,assignment_scope,scope_ref_id,title,description,assigned_to,created_by,priority,start_date,due_date,attachment_url,task_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [batchId, type, scopeRef, title, textOrNull(description), id, req.user!.employeeId, priority, startDate || null, dueDate || null, textOrNull(attachmentUrl), normalizedTaskType]);
       created.push(r.rows[0]);
       await client.query(`INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_ASSIGNED','New task assigned',$2,'TASK',$3)`, [id, title, String(r.rows[0].id)]);
     }
@@ -2759,9 +2774,14 @@ export async function adminUpdateTask(req: Request, res: Response) {
   const before = beforeResult.rows[0];
 
   const assignedTo = numOrNull(b.assignedTo);
+  const taskType = String(b.taskType || before.task_type || 'TECHNICAL').toUpperCase();
+  if (!['TECHNICAL', 'NON_TECHNICAL'].includes(taskType)) {
+    return res.status(400).json({ message: 'Invalid task type.' });
+  }
+
   const r = await query<any>(
-    `UPDATE tasks SET title=COALESCE($1,title),description=$2,assigned_to=COALESCE($3,assigned_to),priority=COALESCE($4,priority),start_date=$5,due_date=$6,status=COALESCE($7,status),progress=COALESCE($8,progress),attachment_url=$9,completed_at=CASE WHEN COALESCE($7,status)='COMPLETED' THEN COALESCE(completed_at,now()) ELSE NULL END,updated_at=now() WHERE id=$10 RETURNING *`,
-    [b.title || null, textOrNull(b.description), assignedTo, b.priority || null, b.startDate || null, b.dueDate || null, b.status || null, b.progress === '' || b.progress === undefined ? null : Number(b.progress), textOrNull(b.attachmentUrl), id]
+    `UPDATE tasks SET title=COALESCE($1,title),description=$2,assigned_to=COALESCE($3,assigned_to),priority=COALESCE($4,priority),task_type=$5,start_date=$6,due_date=$7,status=COALESCE($8,status),progress=COALESCE($9,progress),attachment_url=$10,completed_at=CASE WHEN COALESCE($8,status)='COMPLETED' THEN COALESCE(completed_at,now()) ELSE NULL END,updated_at=now() WHERE id=$11 RETURNING *`,
+    [b.title || null, textOrNull(b.description), assignedTo, b.priority || null, taskType, b.startDate || null, b.dueDate || null, b.status || null, b.progress === '' || b.progress === undefined ? null : Number(b.progress), textOrNull(b.attachmentUrl), id]
   );
   const after = r.rows[0];
 
@@ -2996,7 +3016,14 @@ async function getEffectiveWorkHours(employeeId: number) {
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
-      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      (
+        SELECT wh.hours
+        FROM work_hours_settings wh
+        WHERE wh.scope='DEFAULT'
+          AND wh.updated_at::date = current_date
+        ORDER BY wh.updated_at DESC, wh.id DESC
+        LIMIT 1
+      ),
       3
     )::numeric AS hours
     FROM employees e
@@ -3007,8 +3034,16 @@ async function getEffectiveWorkHours(employeeId: number) {
 }
 
 export async function listWorkHours(req: Request, res: Response) {
+  if (req.user!.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ message: 'Only Super Admin can access work-hours settings.' });
+  }
   const r = await query<any>(`
-    SELECT wh.*,
+    SELECT
+      wh.*,
+      CASE
+        WHEN wh.scope='DEFAULT' AND wh.updated_at::date < current_date THEN 3
+        ELSE wh.hours
+      END AS current_hours,
       CASE
         WHEN wh.scope='DEFAULT' THEN 'Default'
         WHEN wh.scope='DEPARTMENT' THEN COALESCE(d.name,'Department')
@@ -3026,6 +3061,9 @@ export async function listWorkHours(req: Request, res: Response) {
 }
 
 export async function saveWorkHours(req: Request, res: Response) {
+  if (req.user!.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ message: 'Only Super Admin can modify work-hours settings.' });
+  }
   const scope=String(req.body.scope||'').toUpperCase();
   const scopeId=req.body.scopeId===''||req.body.scopeId===null||req.body.scopeId===undefined?null:Number(req.body.scopeId);
   const hours=Number(req.body.hours);
@@ -3052,6 +3090,9 @@ export async function saveWorkHours(req: Request, res: Response) {
 }
 
 export async function deleteWorkHours(req: Request, res: Response) {
+  if (req.user!.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({ message: 'Only Super Admin can modify work-hours settings.' });
+  }
   const id=Number(req.params.id);
   const r=await query<any>(`DELETE FROM work_hours_settings WHERE id=$1 AND scope <> 'DEFAULT' RETURNING *`,[id]);
   if(!r.rows[0]) return res.status(404).json({message:'Work-hours override not found.'});
