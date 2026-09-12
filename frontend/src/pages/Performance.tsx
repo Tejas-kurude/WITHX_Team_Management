@@ -23,7 +23,9 @@ export default function Performance() {
 
   const load = async () => {
     try {
-      const r = await api.get('/performance');
+      const r = await api.get('/performance', {
+        params: { _ts: Date.now() },
+      });
       setRows(Array.isArray(r.data) ? r.data : []);
     } catch (e) {
       setMsg(messageOf(e));
@@ -52,14 +54,41 @@ export default function Performance() {
       setCalculating(true);
       setMsg('');
 
-      await api.post('/performance/calculate', null, {
+      const response = await api.post('/performance/calculate', null, {
         params: {
           employeeId: employeeId || target || undefined,
         },
       });
 
-      setMsg('Performance recalculated successfully.');
+      // Use the freshly calculated server response immediately instead of
+      // waiting for a second GET /performance request. This prevents the
+      // card from temporarily (or incorrectly) showing an older score.
+      const calculated = response.data;
+
+      if (Array.isArray(calculated?.scores)) {
+        setRows(calculated.scores);
+      } else if (calculated?.employee_id || calculated?.id) {
+        setRows((previous) => {
+          const incomingId = Number(calculated.employee_id);
+          const existingIndex = previous.findIndex(
+            (row) => Number(row.employee_id) === incomingId
+          );
+
+          if (existingIndex === -1) {
+            return [calculated, ...previous];
+          }
+
+          const next = [...previous];
+          next[existingIndex] = { ...next[existingIndex], ...calculated };
+          return next;
+        });
+      }
+
+      // Re-read the list without cache after the calculation. This guarantees
+      // the card is synchronized with the newest saved performance row.
       await load();
+
+      setMsg('Performance recalculated successfully.');
     } catch (e) {
       setMsg(messageOf(e));
     } finally {
@@ -72,13 +101,20 @@ export default function Performance() {
       setCalculating(true);
       setMsg('');
 
-      await api.post('/performance/calculate');
+      const response = await api.post('/performance/calculate');
+
+      // The calculate endpoint returns the newly calculated rows. Apply
+      // those rows directly so the UI cannot fall back to an older record.
+      if (Array.isArray(response.data?.scores)) {
+        setRows(response.data.scores);
+      }
+
+      // Always refresh from the server using a cache-busting query.
+      await load();
 
       setMsg(
         'Performance recalculated successfully for all accessible employees.'
       );
-
-      await load();
     } catch (e) {
       setMsg(messageOf(e));
     } finally {
@@ -107,7 +143,7 @@ export default function Performance() {
     <>
       <PageTitle
         title="Performance Management"
-        subtitle="Automatic score: task completion 35% + on-time completion 25% + attendance 20% + working hours 20%"
+        subtitle="Final performance = 100% − task deduction − leave deduction"
         action={
           user?.role === 'EMPLOYEE' ? (
             <button
@@ -179,9 +215,11 @@ export default function Performance() {
 
             const metrics = [
               ['Task completion', r.task_completion],
-              ['On-time completion', r.on_time],
               ['Attendance', r.attendance],
               ['Working hours', r.working_hours],
+              ['Task deduction', r.task_deduction],
+              ['Leave deduction', r.leave_deduction],
+              ['Total deductions', r.deductions],
             ];
 
             const requiredWorkHours = Number.isFinite(Number(r.required_work_hours))
@@ -252,7 +290,7 @@ export default function Performance() {
                           : 'mt-1 text-xs text-black'
                       }
                     >
-                      Last 30-day score
+                      Final performance
                     </div>
                   </div>
 
@@ -262,8 +300,8 @@ export default function Performance() {
                       isSelected
                         ? `
                           grid
-                          h-16
-                          w-16
+                          h-24
+                          w-24
                           shrink-0
                           place-items-center
                           rounded-full
@@ -277,8 +315,8 @@ export default function Performance() {
                         `
                         : `
                           grid
-                          h-16
-                          w-16
+                          h-24
+                          w-24
                           shrink-0
                           place-items-center
                           rounded-full
@@ -292,7 +330,7 @@ export default function Performance() {
                         `
                     }
                   >
-                    {score.toFixed(0)}%
+                    {score.toFixed(2)}%
                   </div>
                 </div>
 
@@ -323,7 +361,7 @@ export default function Performance() {
                             : 'text-black'
                         }
                       >
-                        {clampScore(value).toFixed(1)}%
+                        {clampScore(value).toFixed(2)}%
                       </b>
                     </div>
                   ))}
@@ -361,7 +399,7 @@ export default function Performance() {
                     </b>
                   </div>
                   <div className="mt-1">
-                    Working-hours score was calculated using this required-hours target and is capped at 100%.
+                    Task deduction and leave deduction are calculated separately. Their sum is deducted from 100%.
                   </div>
                 </div>
               </div>

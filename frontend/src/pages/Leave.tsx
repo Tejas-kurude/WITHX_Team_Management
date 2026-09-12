@@ -42,6 +42,15 @@ export default function Leave() {
     void load();
   }, []);
 
+  async function recalculatePerformance() {
+    try {
+      await api.post('/performance/calculate');
+    } catch {
+      // The leave action itself has succeeded. Do not block it if the
+      // optional immediate performance refresh fails.
+    }
+  }
+
   async function save(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
 
@@ -67,6 +76,10 @@ export default function Leave() {
         await api.post('/leave', body);
       }
 
+      // Recalculate immediately. Pending leave is ignored by the backend,
+      // so deductions change only once the leave is approved.
+      await recalculatePerformance();
+
       setShow(false);
       setEditing(null);
 
@@ -87,6 +100,10 @@ export default function Leave() {
         comment: comment.trim(),
       });
 
+      // Approval/rejection updates performance immediately; it does not wait
+      // for the leave date to arrive.
+      await recalculatePerformance();
+
       setDecision(null);
       setComment('');
 
@@ -104,6 +121,8 @@ export default function Leave() {
       setPageErr('');
 
       await api.delete(`/leave/${deleteLeave.id}`);
+
+      await recalculatePerformance();
 
       setDeleteLeave(null);
 
@@ -154,6 +173,7 @@ export default function Leave() {
                 <th>Type</th>
                 <th>Dates</th>
                 <th>Reason</th>
+                <th>Reference</th>
                 <th>Status</th>
 
                 {canApprove && (
@@ -203,6 +223,21 @@ export default function Leave() {
                     <div className="max-w-[280px] overflow-hidden break-all whitespace-normal">
                       {r.reason}
                     </div>
+                  </td>
+
+                  <td>
+                    {r.reference_link ? (
+                      <a
+                        href={r.reference_link}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-orange underline break-all"
+                      >
+                        Open reference
+                      </a>
+                    ) : (
+                      '—'
+                    )}
                   </td>
 
                   <td>
@@ -339,14 +374,12 @@ export default function Leave() {
                 className="input mt-1"
                 name="type"
                 defaultValue={
-                  editing?.leave_type || 'CASUAL'
+                  editing?.leave_type || 'PAID'
                 }
               >
-                <option>CASUAL</option>
+                <option>PAID</option>
                 <option>SICK</option>
-                <option>EARNED</option>
                 <option>UNPAID</option>
-                <option>OTHER</option>
               </select>
             </div>
 
@@ -405,6 +438,17 @@ export default function Leave() {
                   editing?.reason || ''
                 }
                 required
+              />
+            </div>
+
+            <div>
+              <label className="label">Reference Link <span className="muted">(optional)</span></label>
+              <input
+                className="input mt-1"
+                type="url"
+                name="referenceLink"
+                placeholder="Optional supporting reference link"
+                defaultValue={editing?.reference_link || ''}
               />
             </div>
 

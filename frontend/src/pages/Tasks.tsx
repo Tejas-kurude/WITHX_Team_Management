@@ -3,6 +3,40 @@ import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
 
+function toDateTimeLocal(value: any) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).slice(0, 16);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function localDateTimeToIso(value: string) {
+  if (!value) return null;
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  return d.toISOString();
+}
+
+function mergeTaskUpdate(current: any, updated: any) {
+  const merged = { ...current, ...updated, is_edited: current?.is_edited || true };
+  const status = String(merged.status || '').toUpperCase();
+  const overdue =
+    !!merged.due_date &&
+    new Date(merged.due_date).getTime() < Date.now() &&
+    !['COMPLETED', 'CANCELLED'].includes(status);
+  merged.display_status =
+    status === 'REJECTED'
+      ? 'REJECTED'
+      : status === 'NEEDS_CHANGES'
+      ? 'NEEDS_CHANGES'
+      : overdue
+      ? 'OVERDUE'
+      : merged.status;
+  return merged;
+}
+
+
 const statuses = [
   'PENDING',
   'IN_PROGRESS',
@@ -96,20 +130,28 @@ export default function Tasks() {
         ? r.data
         : [];
 
-      if (adminOnly) {
-        const adminEmployeeIds = new Set(
-          emps
-            .filter((e) => e.role === 'ADMIN')
-            .map((e) => Number(e.id))
-        );
+      const visibleRows = adminOnly
+        ? taskRows.filter((task: any) => {
+            const adminEmployeeIds = new Set(
+              emps
+                .filter((e) => e.role === 'ADMIN')
+                .map((e) => Number(e.id))
+            );
+            return adminEmployeeIds.has(Number(task.assigned_to));
+          })
+        : taskRows;
 
-        setRows(
-          taskRows.filter((task: any) =>
-            adminEmployeeIds.has(Number(task.assigned_to))
-          )
+      setRows(visibleRows);
+
+      // Keep the open task-details modal synchronized with the latest
+      // server response after status/submission/review changes.
+      if (selectedTask) {
+        const refreshedTask = visibleRows.find(
+          (task: any) => Number(task.id) === Number(selectedTask.id)
         );
-      } else {
-        setRows(taskRows);
+        if (refreshedTask) {
+          setSelectedTask(refreshedTask);
+        }
       }
     } catch (e) {
       setPageErr(messageOf(e));
@@ -301,20 +343,42 @@ export default function Tasks() {
           fd.getAll('assignedToIds');
       }
 
+      let updatedTask: any = null;
+
       if (editing) {
+        if (body.startDate) body.startDate = localDateTimeToIso(String(body.startDate));
+        if (body.dueDate) body.dueDate = localDateTimeToIso(String(body.dueDate));
+
         if (user?.role === 'EMPLOYEE') {
           // A NEEDS_CHANGES task returns to active work after the employee edits it.
-          await api.put(`/tasks/${editing.id}`, {
+          const response = await api.put(`/tasks/${editing.id}`, {
             title: body.title,
             description: body.description,
             attachmentUrl: body.attachmentUrl,
             status: 'IN_PROGRESS',
             progress: 0,
           });
+          updatedTask = response.data;
         } else {
-          await api.put(
+          const response = await api.put(
             `/tasks/${editing.id}/admin`,
             body
+          );
+          updatedTask = response.data;
+        }
+
+        if (updatedTask) {
+          setRows((prev) =>
+            prev.map((task) =>
+              Number(task.id) === Number(editing.id)
+                ? mergeTaskUpdate(task, updatedTask)
+                : task
+            )
+          );
+          setSelectedTask((prev) =>
+            prev && Number(prev.id) === Number(editing.id)
+              ? mergeTaskUpdate(prev, updatedTask)
+              : prev
           );
         }
 
@@ -360,10 +424,25 @@ export default function Tasks() {
         progress = 0;
       }
 
-      await api.put(`/tasks/${id}`, {
+      const response = await api.put(`/tasks/${id}`, {
         status,
         progress,
       });
+
+      if (response.data) {
+        setRows((prev) =>
+          prev.map((task) =>
+            Number(task.id) === Number(id)
+              ? mergeTaskUpdate(task, response.data)
+              : task
+          )
+        );
+        setSelectedTask((prev) =>
+          prev && Number(prev.id) === Number(id)
+            ? mergeTaskUpdate(prev, response.data)
+            : prev
+        );
+      }
 
       await load();
     } catch (e) {
@@ -377,10 +456,25 @@ export default function Tasks() {
 
   async function markWorkComplete(id: number) {
     try {
-      await api.put(`/tasks/${id}`, {
+      const response = await api.put(`/tasks/${id}`, {
         status: 'IN_PROGRESS',
         progress: 100,
       });
+
+      if (response.data) {
+        setRows((prev) =>
+          prev.map((task) =>
+            Number(task.id) === Number(id)
+              ? mergeTaskUpdate(task, response.data)
+              : task
+          )
+        );
+        setSelectedTask((prev) =>
+          prev && Number(prev.id) === Number(id)
+            ? mergeTaskUpdate(prev, response.data)
+            : prev
+        );
+      }
 
       await load();
     } catch (e) {
@@ -443,6 +537,17 @@ export default function Tasks() {
         proofType,
         proofUrl,
       });
+
+      setSelectedTask((prev) =>
+        prev && Number(prev.id) === Number(submitTask.id)
+          ? {
+              ...prev,
+              status: 'SUBMITTED',
+              display_status: 'SUBMITTED',
+              progress: 100,
+            }
+          : prev
+      );
 
       setShowSubmit(false);
       setSubmitTask(null);
@@ -982,9 +1087,6 @@ async function toggleReviewHistory(task: any) {
               <tbody className="divide-y divide-slate-200 bg-white">
                 {rows.map((t) => {
                   const isEditedTask = t.is_edited === true;
-                  const showEditedDot =
-                    isEditedTask &&
-                    seenEditedAt[Number(t.id)] !== t.latest_edit_at;
 
                   return (
                     <tr key={t.id} className="align-middle hover:bg-slate-50/80">
@@ -997,11 +1099,13 @@ async function toggleReviewHistory(task: any) {
                           <div className="max-w-[210px] truncate font-semibold text-navy">
                             {t.title}
                           </div>
-                          {showEditedDot && (
+                          {isEditedTask && (
                             <span
-                              className="h-2.5 w-2.5 shrink-0 rounded-full bg-emerald-500"
+                              className="inline-flex shrink-0 items-center rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 text-[9px] font-extrabold uppercase tracking-wide text-emerald-700"
                               title="Task was edited"
-                            />
+                            >
+                              EDITED
+                            </span>
                           )}
                         </div>
                         {t.employee_code && (
@@ -1084,7 +1188,7 @@ async function toggleReviewHistory(task: any) {
                           className="btn btn-primary !px-4 !py-2"
                           onClick={() => {
                             setSelectedTask(t);
-                            if (isEditedTask && showEditedDot) {
+                            if (isEditedTask) {
                               markEditedTaskSeen(t);
                             }
                             setFlippedTaskId(null);
@@ -2173,15 +2277,7 @@ async function toggleReviewHistory(task: any) {
                   name="dueDate"
                   className="input mt-1"
                   type="datetime-local"
-                  defaultValue={
-                    editing?.due_date
-                      ? new Date(
-                          editing.due_date
-                        )
-                          .toISOString()
-                          .slice(0, 16)
-                      : ''
-                  }
+                  defaultValue={toDateTimeLocal(editing?.due_date)}
                 />
               </div>
 
