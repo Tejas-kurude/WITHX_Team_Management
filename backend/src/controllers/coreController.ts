@@ -3176,7 +3176,7 @@ export async function saveWorkHours(req: Request, res: Response) {
   const scopeId=req.body.scopeId===''||req.body.scopeId===null||req.body.scopeId===undefined?null:Number(req.body.scopeId);
   const hours=Number(req.body.hours);
   if(!['DEFAULT','DEPARTMENT','TEAM','EMPLOYEE'].includes(scope)) return res.status(400).json({message:'Invalid work-hours scope.'});
-  if(scope!=='DEFAULT' && (!Number.isInteger(scopeId)||scopeId<=0)) return res.status(400).json({message:'A valid target is required.'});
+  if(scope!=='DEFAULT' && (scopeId === null || !Number.isInteger(scopeId) || scopeId <= 0)) return res.status(400).json({message:'A valid target is required.'});
   if(!Number.isFinite(hours)||hours<=0||hours>24) return res.status(400).json({message:'Work hours must be greater than 0 and no more than 24 hours.'});
 
   // Non-default scopes have already been validated above, so narrow the
