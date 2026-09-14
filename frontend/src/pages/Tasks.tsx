@@ -38,6 +38,7 @@ function mergeTaskUpdate(current: any, updated: any) {
 
 
 const statuses = [
+  'DRAFT',
   'PENDING',
   'IN_PROGRESS',
   'BLOCKED',
@@ -65,6 +66,7 @@ export default function Tasks() {
 
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
+  const [publishDraftMode, setPublishDraftMode] = useState(false);
   const [deleteTask, setDeleteTask] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [selectedTask, setSelectedTask] = useState<any | null>(null);
@@ -107,6 +109,9 @@ export default function Tasks() {
   });
 
   const [showAdminTasks, setShowAdminTasks] =
+    useState(false);
+
+  const [showDrafts, setShowDrafts] =
     useState(false);
 
   const [teamView, setTeamView] =
@@ -308,6 +313,28 @@ export default function Tasks() {
     }
   }
 
+  async function toggleDrafts() {
+    const nextActive = !showDrafts;
+    setShowDrafts(nextActive);
+    setShowAdminTasks(false);
+    setTeamView('none');
+    setSelectedTeamLead(null);
+    const nextFilters = {
+      ...filters,
+      status: nextActive ? 'DRAFT' : '',
+      teamLeadId: '',
+      employeeId: '',
+    };
+    setFilters(nextFilters);
+    try {
+      setPageErr('');
+      const r = await api.get('/tasks', { params: nextFilters });
+      setRows(Array.isArray(r.data) ? r.data : []);
+    } catch (e) {
+      setPageErr(messageOf(e));
+    }
+  }
+
   function backToTeams() {
     setSelectedTeamLead(null);
     setTeamView('list');
@@ -331,12 +358,63 @@ export default function Tasks() {
     setErr('');
 
     try {
-      const fd = new FormData(e.currentTarget);
-
+      const form = e.currentTarget;
+      const fd = new FormData(form);
+      const submitter = (e.nativeEvent as SubmitEvent).submitter as
+        | HTMLButtonElement
+        | HTMLInputElement
+        | null;
+      const saveMode = String(
+        submitter?.value || fd.get('saveMode') || ''
+      ).toUpperCase();
       const body: any =
         Object.fromEntries(fd.entries());
+      const saveAsDraft = saveMode === 'DRAFT';
+      const editingDraft =
+        !!editing &&
+        String(editing.status || '').toUpperCase() === 'DRAFT';
+      const publishDraft = editingDraft && saveMode === 'PUBLISH';
+      if (publishDraft) {
+        body.status = 'PENDING';
+      }
+      const resultingStatus = String(
+        body.status || (editingDraft ? 'DRAFT' : '')
+      ).toUpperCase();
+      const remainsDraft =
+        editingDraft && resultingStatus === 'DRAFT';
+      body.saveAsDraft = saveAsDraft;
 
       body.assignmentType = assignmentType;
+
+      if (!saveAsDraft && !remainsDraft) {
+        if (!String(body.title || '').trim()) {
+          setErr('Task title is required.');
+          return;
+        }
+
+        const assignmentValue = String(body.assignedTo || '').trim();
+        const multipleIds = fd.getAll('assignedToIds').map(String).filter(Boolean);
+        if (assignmentType === 'INDIVIDUAL' && !assignmentValue) {
+          setErr('Select a user for this task.');
+          return;
+        }
+        if (assignmentType === 'MULTIPLE' && !multipleIds.length) {
+          setErr('Select at least one user for this task.');
+          return;
+        }
+        if (assignmentType === 'TEAM' && user?.role !== 'TEAM_LEAD' && !String(body.teamLeadId || '').trim()) {
+          setErr('Select a team/Team Lead.');
+          return;
+        }
+        if (assignmentType === 'DEPARTMENT' && !String(body.departmentId || '').trim()) {
+          setErr('Select a department.');
+          return;
+        }
+        if (assignmentType === 'ADMIN' && !assignmentValue) {
+          setErr('Select an Admin.');
+          return;
+        }
+      }
 
       if (assignmentType === 'MULTIPLE') {
         body.assignedToIds =
@@ -396,10 +474,20 @@ export default function Tasks() {
 
       setShow(false);
       setEditing(null);
+      setPublishDraftMode(false);
       setAssignmentType('INDIVIDUAL');
       setErr('');
 
-      await load();
+      const nextFilters = {
+        ...filters,
+        status: saveAsDraft || remainsDraft ? 'DRAFT' : '',
+        teamLeadId: '',
+        employeeId: '',
+      };
+      setShowDrafts(saveAsDraft || remainsDraft);
+      setFilters(nextFilters);
+      const refreshed = await api.get('/tasks', { params: nextFilters });
+      setRows(Array.isArray(refreshed.data) ? refreshed.data : []);
     } catch (e) {
       setErr(messageOf(e));
     }
@@ -838,6 +926,18 @@ async function toggleReviewHistory(task: any) {
               )}
 
               <button
+                type="button"
+                className={`btn ${
+                  showDrafts
+                    ? '!bg-amber-600 !text-white hover:!bg-amber-700'
+                    : '!border-amber-300 !bg-amber-50 !text-amber-800 hover:!bg-amber-100'
+                }`}
+                onClick={() => void toggleDrafts()}
+              >
+                Drafts
+              </button>
+
+              <button
                 className="btn btn-accent"
                 onClick={() => {
                   setEditing(null);
@@ -845,6 +945,7 @@ async function toggleReviewHistory(task: any) {
                     'INDIVIDUAL'
                   );
                   setErr('');
+                  setShowDrafts(false);
                   setShow(true);
                 }}
               >
@@ -924,30 +1025,24 @@ async function toggleReviewHistory(task: any) {
           }
         />
 
-        <select
-          className="input"
-          value={filters.status}
-          onChange={(e) =>
-            setFilters({
-              ...filters,
-              status: e.target.value,
-            })
-          }
-        >
-          <option value="">
-            All status
-          </option>
-
-          {statuses.map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-
-          <option value="OVERDUE">
-            OVERDUE
-          </option>
-        </select>
+        {!showDrafts && (
+          <select
+            className="input"
+            value={filters.status}
+            onChange={(e) =>
+              setFilters({
+                ...filters,
+                status: e.target.value,
+              })
+            }
+          >
+            <option value="">All status</option>
+            {statuses.filter((s) => s !== 'DRAFT').map((s) => (
+              <option key={s} value={s}>{s}</option>
+            ))}
+            <option value="OVERDUE">OVERDUE</option>
+          </select>
+        )}
 
         <select
           className="input"
@@ -1218,6 +1313,10 @@ async function toggleReviewHistory(task: any) {
       {selectedTask && (() => {
         const t = selectedTask;
         const isAssignedEmployee = t.assigned_to === user?.employeeId;
+        const canEditDraft =
+          t.status === 'DRAFT' &&
+          t.created_by === user?.employeeId &&
+          canAssign;
         const isSubmitted =
           t.status === 'SUBMITTED' || t.display_status === 'SUBMITTED';
         const isNeedsChanges =
@@ -1275,6 +1374,8 @@ async function toggleReviewHistory(task: any) {
                     className={`badge ${
                       t.display_status === 'OVERDUE'
                         ? '!bg-red-100 !text-red-700'
+                        : t.display_status === 'DRAFT'
+                        ? '!bg-amber-100 !text-amber-800'
                         : ''
                     }`}
                   >
@@ -1290,50 +1391,89 @@ async function toggleReviewHistory(task: any) {
                 </div>
 
                 <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="btn !border-slate-300 !bg-slate-100 !text-slate-800 hover:!bg-slate-200"
-                    disabled={historyLoadingId === Number(t.id)}
-                    onClick={() => void toggleReviewHistory(t)}
-                  >
-                    {historyLoadingId === Number(t.id)
-                      ? 'Loading...'
-                      : historyOpen
-                      ? 'Hide Task History'
-                      : 'Task History'}
-                  </button>
-
-                  {isAssignedEmployee && isNeedsChanges && (
-                    <button
-                      className="btn !border-slate-300 !bg-slate-100 !text-slate-800"
-                      onClick={() => {
-                        setEditing(t);
-                        setErr('');
-                        setShow(true);
-                      }}
-                    >
-                      Edit Task
-                    </button>
-                  )}
-
-                  {isSuper && (
+                  {t.status === 'DRAFT' ? (
                     <>
                       <button
+                        type="button"
                         className="btn !border-sky-300 !bg-sky-50 !text-sky-800"
                         onClick={() => {
                           setEditing(t);
+                          setPublishDraftMode(false);
                           setErr('');
+                          setSelectedTask(null);
                           setShow(true);
                         }}
                       >
-                        Edit
+                        Edit Draft
                       </button>
                       <button
-                        className="btn !border-rose-300 !bg-rose-50 !text-rose-800"
-                        onClick={() => setDeleteTask(t)}
+                        type="button"
+                        className="btn btn-primary"
+                        onClick={() => {
+                          setEditing(t);
+                          setPublishDraftMode(true);
+                          setErr('');
+                          setSelectedTask(null);
+                          setShow(true);
+                        }}
                       >
-                        Delete
+                        Publish Draft
                       </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        className="btn !border-slate-300 !bg-slate-100 !text-slate-800 hover:!bg-slate-200"
+                        disabled={historyLoadingId === Number(t.id)}
+                        onClick={() => void toggleReviewHistory(t)}
+                      >
+                        {historyLoadingId === Number(t.id)
+                          ? 'Loading...'
+                          : historyOpen
+                          ? 'Hide Task History'
+                          : 'Task History'}
+                      </button>
+
+                      {isAssignedEmployee && isNeedsChanges && (
+                        <button
+                          type="button"
+                          className="btn !border-slate-300 !bg-slate-100 !text-slate-800"
+                          onClick={() => {
+                            setEditing(t);
+                            setPublishDraftMode(false);
+                            setErr('');
+                            setShow(true);
+                          }}
+                        >
+                          Edit Task
+                        </button>
+                      )}
+
+                      {isSuper && (
+                        <button
+                          type="button"
+                          className="btn !border-sky-300 !bg-sky-50 !text-sky-800"
+                          onClick={() => {
+                            setEditing(t);
+                            setPublishDraftMode(false);
+                            setErr('');
+                            setShow(true);
+                          }}
+                        >
+                          Edit
+                        </button>
+                      )}
+
+                      {isSuper && (
+                        <button
+                          type="button"
+                          className="btn !border-rose-300 !bg-rose-50 !text-rose-800"
+                          onClick={() => setDeleteTask(t)}
+                        >
+                          Delete
+                        </button>
+                      )}
                     </>
                   )}
                 </div>
@@ -1505,6 +1645,7 @@ async function toggleReviewHistory(task: any) {
                 </div>
               )}
 
+              {t.status !== 'DRAFT' && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-200 bg-white p-4">
                 {isAssignedEmployee ? (
                   <>
@@ -1559,6 +1700,7 @@ async function toggleReviewHistory(task: any) {
                   </button>
                 )}
               </div>
+              )}
 
               {historyOpen && (
                 <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
@@ -1913,7 +2055,9 @@ async function toggleReviewHistory(task: any) {
         <Modal
           title={
             editing
-              ? user?.role === 'EMPLOYEE'
+              ? publishDraftMode
+                ? 'Publish Draft'
+                : user?.role === 'EMPLOYEE'
                 ? 'Edit Task & Continue Work'
                 : 'Edit Task'
               : 'Create Task'
@@ -1921,6 +2065,7 @@ async function toggleReviewHistory(task: any) {
           onClose={() => {
             setShow(false);
             setEditing(null);
+            setPublishDraftMode(false);
             setErr('');
           }}
         >
@@ -1937,7 +2082,6 @@ async function toggleReviewHistory(task: any) {
               defaultValue={
                 editing?.title || ''
               }
-              required
             />
 
             <textarea
@@ -2025,7 +2169,6 @@ async function toggleReviewHistory(task: any) {
                   <select
                     name="assignedTo"
                     className="input"
-                    required
                   >
                     <option value="">
                       Select user
@@ -2058,7 +2201,6 @@ async function toggleReviewHistory(task: any) {
                       multiple
                       name="assignedToIds"
                       className="input mt-1 min-h-36"
-                      required
                     >
                       {emps.map((e) => (
                         <option
@@ -2083,7 +2225,6 @@ async function toggleReviewHistory(task: any) {
                   <select
                     name="teamLeadId"
                     className="input"
-                    required
                   >
                     <option value="">
                       Select team / Team Lead
@@ -2120,7 +2261,6 @@ async function toggleReviewHistory(task: any) {
                   <select
                     name="departmentId"
                     className="input"
-                    required
                   >
                     <option value="">
                       Select department
@@ -2143,7 +2283,6 @@ async function toggleReviewHistory(task: any) {
                   <select
                     name="assignedTo"
                     className="input"
-                    required
                   >
                     <option value="">
                       Select Admin
@@ -2181,47 +2320,98 @@ async function toggleReviewHistory(task: any) {
 
             {editing && user?.role !== 'EMPLOYEE' && (
               <>
-                <select
-                  name="assignedTo"
-                  className="input"
-                  defaultValue={
-                    editing.assigned_to
-                  }
-                >
-                  {emps.map((e) => (
-                    <option
-                      key={e.id}
-                      value={e.id}
-                    >
-                      {e.employee_code} —{' '}
-                      {e.first_name}{' '}
-                      {e.last_name}
-                    </option>
-                  ))}
-                </select>
+                {String(editing.status || '').toUpperCase() === 'DRAFT' ? (
+                  <>
+                    <div>
+                      <label className="label">Assignment Type</label>
+                      <select
+                        className="input mt-1"
+                        value={assignmentType}
+                        onChange={(e) => setAssignmentType(e.target.value)}
+                      >
+                        <option value="INDIVIDUAL">Individual employee/intern</option>
+                        <option value="MULTIPLE">Multiple employees/interns</option>
+                        <option value="TEAM">Entire team</option>
+                        {user?.role !== 'TEAM_LEAD' && <option value="DEPARTMENT">Department</option>}
+                        {(['ADMIN', 'SUPER_ADMIN'] as string[]).includes(user?.role || '') && <option value="ADMIN">Admin</option>}
+                      </select>
+                    </div>
 
-                <div>
-                  <label className="label">
-                    Task Type
-                  </label>
+                    {assignmentType === 'INDIVIDUAL' && (
+                      <select name="assignedTo" className="input">
+                        <option value="">Select user</option>
+                        {emps.map((e) => (
+                          <option key={e.id} value={e.id}>{e.employee_code} — {e.first_name} {e.last_name}</option>
+                        ))}
+                      </select>
+                    )}
 
-                  <select
-                    name="taskType"
-                    className="input mt-1"
-                    defaultValue={
-                      editing.task_type ||
-                      'TECHNICAL'
-                    }
-                  >
-                    <option value="TECHNICAL">
-                      Technical — GitHub proof
-                    </option>
+                    {assignmentType === 'MULTIPLE' && (
+                      <div>
+                        <label className="label">Select multiple users</label>
+                        <select multiple name="assignedToIds" className="input mt-1 min-h-36">
+                          {emps.map((e) => (
+                            <option key={e.id} value={e.id}>{e.employee_code} — {e.first_name} {e.last_name}</option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
 
-                    <option value="NON_TECHNICAL">
-                      Non-Technical — Google Drive proof
-                    </option>
-                  </select>
-                </div>
+                    {assignmentType === 'TEAM' && user?.role !== 'TEAM_LEAD' && (
+                      <select name="teamLeadId" className="input">
+                        <option value="">Select team / Team Lead</option>
+                        {teamLeads.map((e) => (
+                          <option key={e.id} value={e.id}>{e.employee_code} — {e.first_name} {e.last_name}</option>
+                        ))}
+                      </select>
+                    )}
+
+                    {assignmentType === 'TEAM' && user?.role === 'TEAM_LEAD' && (
+                      <div className="rounded-lg bg-slate-50 p-3 text-sm">This task will be assigned to all current members under your supervision.</div>
+                    )}
+
+                    {assignmentType === 'DEPARTMENT' && (
+                      <select name="departmentId" className="input">
+                        <option value="">Select department</option>
+                        {deps.map((d) => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    )}
+
+                    {assignmentType === 'ADMIN' && (
+                      <select name="assignedTo" className="input">
+                        <option value="">Select Admin</option>
+                        {emps.filter((e) => e.role === 'ADMIN' && e.status === 'ACTIVE').map((e) => (
+                          <option key={e.id} value={e.id}>{e.employee_code} — {e.first_name} {e.last_name}</option>
+                        ))}
+                      </select>
+                    )}
+
+                    <div className="rounded-lg bg-amber-50 p-3 text-xs text-amber-800">
+                      Draft fields remain optional while saving. Assignment is required only when publishing.
+                    </div>
+
+                    <div>
+                      <label className="label">Task Type</label>
+                      <select name="taskType" className="input mt-1" defaultValue={editing.task_type || 'TECHNICAL'}>
+                        <option value="TECHNICAL">Technical — GitHub proof</option>
+                        <option value="NON_TECHNICAL">Non-Technical — Google Drive proof</option>
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <>
+                    <select name="assignedTo" className="input" defaultValue={editing.assigned_to}>
+                      {emps.map((e) => <option key={e.id} value={e.id}>{e.employee_code} — {e.first_name} {e.last_name}</option>)}
+                    </select>
+                    <div>
+                      <label className="label">Task Type</label>
+                      <select name="taskType" className="input mt-1" defaultValue={editing.task_type || 'TECHNICAL'}>
+                        <option value="TECHNICAL">Technical — GitHub proof</option>
+                        <option value="NON_TECHNICAL">Non-Technical — Google Drive proof</option>
+                      </select>
+                    </div>
+                  </>
+                )}
               </>
             )}
 
@@ -2296,7 +2486,7 @@ async function toggleReviewHistory(task: any) {
 
             {/* ADMIN EDIT STATUS */}
 
-            {editing && user?.role !== 'EMPLOYEE' && (
+            {editing && user?.role !== 'EMPLOYEE' && String(editing.status || '').toUpperCase() !== 'DRAFT' && (
               <div className="grid gap-4 sm:grid-cols-2">
 
                 <select
@@ -2336,13 +2526,41 @@ async function toggleReviewHistory(task: any) {
               </div>
             )}
 
-            <button className="btn btn-primary">
-              {editing
-                ? user?.role === 'EMPLOYEE'
-                  ? 'Save & Continue Work'
-                  : 'Save Changes'
-                : 'Create & Notify'}
-            </button>
+            {editing ? (
+              String(editing.status || '').toUpperCase() === 'DRAFT' ? (
+                <div className="flex flex-wrap gap-3">
+                  <button type="submit" name="saveMode" value="DRAFT" className="btn !border-amber-300 !bg-amber-50 !text-amber-800 hover:!bg-amber-100">
+                    Save Draft
+                  </button>
+                  <button type="submit" name="saveMode" value="PUBLISH" className="btn btn-primary">
+                    Publish Draft
+                  </button>
+                </div>
+              ) : (
+                <button className="btn btn-primary">
+                  {user?.role === 'EMPLOYEE' ? 'Save & Continue Work' : 'Save Changes'}
+                </button>
+              )
+            ) : (
+              <div className="flex flex-wrap gap-3">
+                <button
+                  type="submit"
+                  name="saveMode"
+                  value="DRAFT"
+                  className="btn !border-amber-300 !bg-amber-50 !text-amber-800 hover:!bg-amber-100"
+                >
+                  Save as Draft
+                </button>
+                <button
+                  type="submit"
+                  name="saveMode"
+                  value="CREATE"
+                  className="btn btn-primary"
+                >
+                  Create & Notify
+                </button>
+              </div>
+            )}
 
           </form>
         </Modal>

@@ -12,6 +12,37 @@ const isManager = (role?: string) => ['SUPER_ADMIN', 'ADMIN', 'TEAM_LEAD'].inclu
 const numOrNull = (v: any) => v === '' || v === undefined || v === null ? null : Number(v);
 const textOrNull = (v: any) => v === '' || v === undefined || v === null ? null : String(v);
 
+
+async function saveProfilePhoto(fileName: any, fileData: any) {
+  if (!fileName || !fileData) return null;
+
+  const match = String(fileData).match(
+    /^data:(image\/(?:png|jpeg|webp));base64,(.+)$/
+  );
+
+  if (!match) {
+    throw new Error('Profile photo must be JPG, PNG or WEBP.');
+  }
+
+  const bytes = Buffer.from(match[2], 'base64');
+
+  if (bytes.length > 2 * 1024 * 1024) {
+    throw new Error('Profile photo must be 2 MB or smaller.');
+  }
+
+  const safeOriginal = path
+    .basename(String(fileName))
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
+
+  const storedName = `${Date.now()}-${randomUUID()}-${safeOriginal}`;
+  const uploadDir = path.resolve(process.cwd(), 'uploads', 'profile-photos');
+
+  await mkdir(uploadDir, { recursive: true });
+  await writeFile(path.join(uploadDir, storedName), bytes);
+
+  return `/uploads/profile-photos/${storedName}`;
+}
+
 function passwordEncryptionKey() {
   const raw = process.env.PASSWORD_ENCRYPTION_KEY || '';
   if (!raw) throw new Error('PASSWORD_ENCRYPTION_KEY is not configured.');
@@ -93,7 +124,7 @@ async function syncDeadlineNotifications(employeeId?: number | null) {
     FROM tasks t
     WHERE t.due_date IS NOT NULL
       AND t.due_date > now() AND t.due_date <= now()+interval '24 hours'
-      AND t.status NOT IN ('COMPLETED','CANCELLED') ${scope}
+      AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT') ${scope}
       AND NOT EXISTS (
         SELECT 1 FROM notifications n
         WHERE n.employee_id=t.assigned_to AND n.type='TASK_DEADLINE' AND n.entity_type='TASK' AND n.entity_id=t.id::text
@@ -103,7 +134,7 @@ async function syncDeadlineNotifications(employeeId?: number | null) {
     SELECT t.assigned_to,'TASK_OVERDUE','Task overdue',t.title || ' is overdue.','TASK',t.id::text
     FROM tasks t
     WHERE t.due_date IS NOT NULL AND t.due_date < now()
-      AND t.status NOT IN ('COMPLETED','CANCELLED') ${scope}
+      AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT') ${scope}
       AND NOT EXISTS (
         SELECT 1 FROM notifications n
         WHERE n.employee_id=t.assigned_to AND n.type='TASK_OVERDUE' AND n.entity_type='TASK' AND n.entity_id=t.id::text
@@ -114,7 +145,7 @@ export async function dashboard(req: Request, res: Response) {
   const role = req.user!.role, emp = req.user!.employeeId;
   if (role === 'EMPLOYEE') {
     const [task, att, rep, perf, leave] = await Promise.all([
-      query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE status='COMPLETED')::int completed,count(*) FILTER(WHERE due_date<now() AND status NOT IN ('COMPLETED','CANCELLED'))::int overdue FROM tasks WHERE assigned_to=$1`, [emp]),
+      query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE status='COMPLETED')::int completed,count(*) FILTER(WHERE due_date<now() AND status NOT IN ('COMPLETED','CANCELLED','DRAFT'))::int overdue FROM tasks WHERE assigned_to=$1`, [emp]),
       query<any>(`SELECT status,attendance_mode,check_in,check_out FROM attendance WHERE employee_id=$1 AND work_date=current_date`, [emp]),
       query<any>(`SELECT count(*)::int submitted FROM daily_reports WHERE employee_id=$1 AND report_date>=date_trunc('month',current_date)`, [emp]),
       query<any>(`SELECT score,task_completion,on_time,attendance,working_hours FROM performance_scores WHERE employee_id=$1 ORDER BY period_end DESC LIMIT 1`, [emp]),
@@ -129,7 +160,7 @@ export async function dashboard(req: Request, res: Response) {
   const [employees, attendance, tasks, depts, activities, presentToday] = await Promise.all([
     query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE e.status='ACTIVE')::int active,count(*) FILTER(WHERE e.user_type='INTERN')::int interns,count(*) FILTER(WHERE e.user_type='EMPLOYEE')::int employees FROM employees e ${employeeWhere}`, params),
     query<any>(`SELECT count(*) FILTER(WHERE a.status IN('PRESENT','LATE'))::int present,count(*) FILTER(WHERE a.status='LATE')::int late,count(*) FILTER(WHERE a.status='LEAVE')::int leave FROM attendance a JOIN employees e ON e.id=a.employee_id WHERE a.work_date=current_date ${joinTeam}`, params),
-    query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE t.status='COMPLETED')::int completed,count(*) FILTER(WHERE t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED'))::int overdue,count(*) FILTER(WHERE t.status='PENDING')::int pending FROM tasks t JOIN employees e ON e.id=t.assigned_to WHERE 1=1 ${joinTeam}`, params),
+    query<any>(`SELECT count(*)::int total,count(*) FILTER(WHERE t.status='COMPLETED')::int completed,count(*) FILTER(WHERE t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT'))::int overdue,count(*) FILTER(WHERE t.status='PENDING')::int pending FROM tasks t JOIN employees e ON e.id=t.assigned_to WHERE 1=1 ${joinTeam}`, params),
     team ? query<any>(`SELECT count(DISTINCT department_id)::int total FROM employees WHERE team_lead_id=$1 AND department_id IS NOT NULL`, [emp]) : query<any>('SELECT count(*)::int total FROM departments'),
     isAdmin(role) ? query<any>('SELECT al.id,al.action,al.entity_type,al.created_at,u.email FROM activity_logs al LEFT JOIN users u ON u.id=al.user_id ORDER BY al.created_at DESC LIMIT 8') : Promise.resolve({ rows: [] } as any),
     query<any>(`
@@ -252,7 +283,23 @@ export async function getEmployee(req: Request, res: Response) {
   res.json(r.rows[0]);
 }
 export async function createEmployee(req: Request, res: Response) {
-  const { firstName, lastName, email, phone, jobTitle, departmentId, role = 'EMPLOYEE', joiningDate, password, teamLeadId, adminId, userType = 'EMPLOYEE' } = req.body;
+  const {
+    firstName,
+    lastName,
+    email,
+    phone,
+    jobTitle,
+    departmentId,
+    role = 'EMPLOYEE',
+    joiningDate,
+    password,
+    teamLeadId,
+    adminId,
+    userType = 'EMPLOYEE',
+    photoUrl,
+    photoFileName,
+    photoFileData
+  } = req.body;
   if (!firstName || !lastName || !email || !password) return res.status(400).json({ message: 'First name, last name, email and password are required' });
   if (!['INTERN', 'EMPLOYEE'].includes(userType)) return res.status(400).json({ message: 'User type must be INTERN or EMPLOYEE' });
   if (!['EMPLOYEE', 'TEAM_LEAD', 'ADMIN', 'SUPER_ADMIN'].includes(role)) return res.status(400).json({ message: 'Invalid role' });
@@ -261,6 +308,21 @@ export async function createEmployee(req: Request, res: Response) {
   const parsedAdminId = numOrNull(adminId);
   if (role === 'TEAM_LEAD') {
     if (!parsedAdminId) return res.status(400).json({ message: 'Please assign an Admin to the Team Lead.' });
+  }
+
+  let savedPhotoUrl: string | null = textOrNull(photoUrl);
+
+  if (photoFileName && photoFileData) {
+    try {
+      savedPhotoUrl = await saveProfilePhoto(
+        photoFileName,
+        photoFileData
+      );
+    } catch (error: any) {
+      return res.status(400).json({
+        message: error?.message || 'Unable to save profile photo.'
+      });
+    }
   }
 
   const client = await pool.connect();
@@ -286,7 +348,38 @@ export async function createEmployee(req: Request, res: Response) {
     }
 
     const code = await nextUserCode(client, userType);
-    const e = await client.query<any>(`INSERT INTO employees(employee_code,user_type,first_name,last_name,email,phone,job_title,department_id,joining_date,team_lead_id,admin_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`, [code, userType, firstName, lastName, email, textOrNull(phone), textOrNull(jobTitle), numOrNull(departmentId), joiningDate || new Date().toISOString().slice(0, 10), numOrNull(teamLeadId), role === 'TEAM_LEAD' ? parsedAdminId : null]);
+    const e = await client.query<any>(
+      `INSERT INTO employees(
+        employee_code,
+        user_type,
+        first_name,
+        last_name,
+        email,
+        phone,
+        job_title,
+        department_id,
+        joining_date,
+        team_lead_id,
+        admin_id,
+        photo_url
+      )
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+      RETURNING *`,
+      [
+        code,
+        userType,
+        firstName,
+        lastName,
+        email,
+        textOrNull(phone),
+        textOrNull(jobTitle),
+        numOrNull(departmentId),
+        joiningDate || new Date().toISOString().slice(0, 10),
+        numOrNull(teamLeadId),
+        role === 'TEAM_LEAD' ? parsedAdminId : null,
+        savedPhotoUrl
+      ]
+    );
     const hash = await bcrypt.hash(password, 12);
     const encryptedPassword = encryptPassword(password);
     await client.query('INSERT INTO users(email,password_hash,password_encrypted,role,employee_id) VALUES($1,$2,$3,$4,$5)', [email, hash, encryptedPassword, role, e.rows[0].id]);
@@ -332,7 +425,50 @@ export async function updateEmployee(req: Request, res: Response) {
     if (!adminCheck.rows[0]) return res.status(400).json({ message: 'Selected Admin is not a valid active Admin account.' });
   }
 
-  const r = await query<any>(`UPDATE employees SET first_name=COALESCE($1,first_name),last_name=COALESCE($2,last_name),phone=$3,job_title=$4,department_id=$5,team_lead_id=$6,admin_id=$7,status=COALESCE($8,status),updated_at=now() WHERE id=$9 RETURNING *`, [b.firstName || null, b.lastName || null, textOrNull(b.phone), textOrNull(b.jobTitle), numOrNull(b.departmentId), numOrNull(b.teamLeadId), effectiveRole === 'TEAM_LEAD' ? parsedAdminId : null, b.status || null, id]);
+  let newPhotoUrl: string | null = null;
+
+  if (b.photoFileName && b.photoFileData) {
+    try {
+      newPhotoUrl = await saveProfilePhoto(
+        b.photoFileName,
+        b.photoFileData
+      );
+    } catch (error: any) {
+      return res.status(400).json({
+        message: error?.message || 'Unable to save profile photo.'
+      });
+    }
+  } else if (b.photoUrl !== undefined) {
+    newPhotoUrl = textOrNull(b.photoUrl);
+  }
+
+  const r = await query<any>(
+    `UPDATE employees
+     SET first_name=COALESCE($1,first_name),
+         last_name=COALESCE($2,last_name),
+         phone=$3,
+         job_title=$4,
+         department_id=$5,
+         team_lead_id=$6,
+         admin_id=$7,
+         status=COALESCE($8,status),
+         photo_url=COALESCE($9::text, photo_url),
+         updated_at=now()
+     WHERE id=$10
+     RETURNING *`,
+    [
+      b.firstName || null,
+      b.lastName || null,
+      textOrNull(b.phone),
+      textOrNull(b.jobTitle),
+      numOrNull(b.departmentId),
+      numOrNull(b.teamLeadId),
+      effectiveRole === 'TEAM_LEAD' ? parsedAdminId : null,
+      b.status || null,
+      newPhotoUrl,
+      id
+    ]
+  );
   if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
 
   if (b.password !== undefined && String(b.password).trim()) {
@@ -401,8 +537,18 @@ export async function listTasks(req: Request, res: Response) {
     )`;
   }
   if (search) { p.push(`%${search}%`); w += ` AND (t.title ILIKE $${p.length} OR t.description ILIKE $${p.length} OR e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length})`; }
+
+  // Drafts are private to their creator and live only in the Drafts view.
+  if (status === 'DRAFT') {
+    p.push(req.user!.employeeId);
+    w += ` AND t.status = 'DRAFT' AND t.created_by = $${p.length}`;
+  } else if (!status) {
+    // Never expose drafts through the normal Tasks view.
+    w += ` AND t.status <> 'DRAFT'`;
+  }
+
   if (status) {
-    if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED')`;
+    if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT')`;
     else { p.push(status); w += ` AND t.status=$${p.length}`; }
   }
   if (priority) { p.push(priority); w += ` AND t.priority=$${p.length}`; }
@@ -721,7 +867,7 @@ END AS hierarchy_review_status,
      */
 
     CASE
-      WHEN t.status IN ('REJECTED', 'NEEDS_CHANGES', 'COMPLETED', 'CANCELLED') THEN NULL
+      WHEN t.status IN ('DRAFT', 'REJECTED', 'NEEDS_CHANGES', 'COMPLETED', 'CANCELLED') THEN NULL
       WHEN lead_review.decision = 'PENDING'
        AND admin_review.decision = 'PENDING'
        AND super_review.decision = 'PENDING'
@@ -756,7 +902,7 @@ END AS hierarchy_review_status,
 CASE
      WHEN t.status = 'REJECTED' THEN 'REJECTED'
      WHEN t.status = 'NEEDS_CHANGES' THEN 'NEEDS_CHANGES'
-     WHEN t.due_date < now() AND t.status NOT IN ('COMPLETED', 'CANCELLED') THEN 'OVERDUE'
+     WHEN t.due_date < now() AND t.status NOT IN ('COMPLETED', 'CANCELLED', 'DRAFT') THEN 'OVERDUE'
      ELSE t.status
    END AS display_status
 
@@ -858,26 +1004,32 @@ CASE
 res.json(r.rows);
 }
 export async function createTask(req: Request, res: Response) {
-  const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl, taskType = 'TECHNICAL' } = req.body;
-if (!title || !String(title).trim()) {
+  const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl, taskType = 'TECHNICAL', saveAsDraft = false } = req.body;
+  const draft = String(saveAsDraft).toLowerCase() === 'true' || saveAsDraft === true;
+if (!draft && (!title || !String(title).trim())) {
   return res.status(400).json({
     message: 'Task title is required.'
   });
 }
 
-if (String(title).trim().length > 500) {
+if (title && String(title).trim().length > 500) {
   return res.status(400).json({
     message: 'Task title must be 500 characters or less. Put additional details in the description.'
   });
 }  const type = String(assignmentType).toUpperCase();
   const normalizedTaskType = String(taskType || 'TECHNICAL').toUpperCase();
   if (!['TECHNICAL', 'NON_TECHNICAL'].includes(normalizedTaskType)) return res.status(400).json({ message: 'Invalid task type.' });
-  if (!['INDIVIDUAL', 'MULTIPLE', 'TEAM', 'DEPARTMENT', 'ADMIN'].includes(type)) return res.status(400).json({ message: 'Invalid assignment type.' });
+  if (!draft && !['INDIVIDUAL', 'MULTIPLE', 'TEAM', 'DEPARTMENT', 'ADMIN'].includes(type)) return res.status(400).json({ message: 'Invalid assignment type.' });
   let ids: number[] = [];
   let scopeRef: number | null = null;
-  if (type === 'INDIVIDUAL') ids = [Number(assignedTo)].filter(Boolean);
-  if (type === 'MULTIPLE') ids = (Array.isArray(assignedToIds) ? assignedToIds : String(assignedToIds || '').split(',')).map(Number).filter(Boolean);
-  if (type === 'ADMIN') {
+
+  // Drafts belong to the creator and are not assigned/notified until published.
+  if (draft) {
+    ids = [req.user!.employeeId];
+  }
+  if (!draft && type === 'INDIVIDUAL') ids = [Number(assignedTo)].filter(Boolean);
+  if (!draft && type === 'MULTIPLE') ids = (Array.isArray(assignedToIds) ? assignedToIds : String(assignedToIds || '').split(',')).map(Number).filter(Boolean);
+  if (!draft && type === 'ADMIN') {
     if (!['ADMIN', 'SUPER_ADMIN'].includes(req.user!.role)) {
       return res.status(403).json({ message: 'Only Admins and Super Admin can create Admin-assigned tasks.' });
     }
@@ -904,20 +1056,20 @@ if (String(title).trim().length > 500) {
 
     ids = [adminId];
   }
-  if (type === 'TEAM') {
+  if (!draft && type === 'TEAM') {
     scopeRef = req.user!.role === 'TEAM_LEAD' ? req.user!.employeeId : Number(teamLeadId);
     if (!scopeRef) return res.status(400).json({ message: 'Select a team lead/team.' });
     const rr = await query<any>('SELECT id FROM employees WHERE team_lead_id=$1 AND status=\'ACTIVE\'', [scopeRef]); ids = rr.rows.map(x => x.id);
   }
-  if (type === 'DEPARTMENT') {
+  if (!draft && type === 'DEPARTMENT') {
     if (req.user!.role === 'TEAM_LEAD') return res.status(403).json({ message: 'Team Leads can assign only to their own team, not an entire department.' });
     scopeRef = Number(departmentId);
     if (!scopeRef) return res.status(400).json({ message: 'Select a department.' });
     const rr = await query<any>('SELECT id FROM employees WHERE department_id=$1 AND status=\'ACTIVE\'', [scopeRef]); ids = rr.rows.map(x => x.id);
   }
   ids = [...new Set(ids)];
-  if (!ids.length) return res.status(400).json({ message: 'No eligible employee/intern was selected for this task.' });
-  if (req.user!.role === 'TEAM_LEAD') {
+  if (!draft && !ids.length) return res.status(400).json({ message: 'No eligible employee/intern was selected for this task.' });
+  if (!draft && req.user!.role === 'TEAM_LEAD') {
     for (const id of ids) if (!(await isTeamMember(req.user!.employeeId, id))) return res.status(403).json({ message: 'Team Leads may assign tasks only to employees/interns under their supervision.' });
   }
   const batchId = randomUUID();
@@ -926,14 +1078,16 @@ if (String(title).trim().length > 500) {
   try {
     await client.query('BEGIN');
     for (const id of ids) {
-      const r = await client.query<any>(`INSERT INTO tasks(assignment_batch_id,assignment_scope,scope_ref_id,title,description,assigned_to,created_by,priority,start_date,due_date,attachment_url,task_type) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`, [batchId, type, scopeRef, title, textOrNull(description), id, req.user!.employeeId, priority, startDate || null, dueDate || null, textOrNull(attachmentUrl), normalizedTaskType]);
+      const r = await client.query<any>(`INSERT INTO tasks(assignment_batch_id,assignment_scope,scope_ref_id,title,description,assigned_to,created_by,priority,start_date,due_date,attachment_url,task_type,status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`, [batchId, draft ? 'INDIVIDUAL' : type, draft ? null : scopeRef, draft ? (title && String(title).trim() ? String(title).trim() : 'Untitled Draft') : title, textOrNull(description), id, req.user!.employeeId, priority, startDate || null, dueDate || null, textOrNull(attachmentUrl), normalizedTaskType, draft ? 'DRAFT' : 'PENDING']);
       created.push(r.rows[0]);
-      await client.query(`INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_ASSIGNED','New task assigned',$2,'TASK',$3)`, [id, title, String(r.rows[0].id)]);
+      if (!draft) {
+        await client.query(`INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_ASSIGNED','New task assigned',$2,'TASK',$3)`, [id, title, String(r.rows[0].id)]);
+      }
     }
     await client.query('COMMIT');
   } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-  await audit(req.user?.userId, 'CREATE', 'TASK', batchId, { title, assignmentType: type, assignedCount: ids.length, assignedTo: ids });
-  res.status(201).json({ batchId, assignedCount: ids.length, tasks: created });
+  await audit(req.user?.userId, draft ? 'CREATE_DRAFT' : 'CREATE', 'TASK', batchId, { title: created[0]?.title, assignmentType: draft ? 'DRAFT' : type, assignedCount: draft ? 0 : ids.length, assignedTo: draft ? [] : ids });
+  res.status(201).json({ batchId, assignedCount: draft ? 0 : ids.length, tasks: created });
 }
 
 
@@ -1665,7 +1819,7 @@ for (const superAdmin of superAdmins.rows) {
         proofType:
           normalizedProofType,
         proofUrl:
-          proofUrl.trim()
+          hasProofUrl ? proofUrl.trim() : null
       }
     );
 
@@ -2800,7 +2954,11 @@ export async function adminUpdateTask(req: Request, res: Response) {
     );
   }
 
-  if (Object.keys(changes).length && after.assigned_to) {
+  if (
+    Object.keys(changes).length &&
+    after.assigned_to &&
+    after.status !== 'DRAFT'
+  ) {
     await query(
       `INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,'TASK_UPDATED','Task updated',$2,'TASK',$3)`,
       [after.assigned_to, after.title, String(id)]
@@ -3494,7 +3652,7 @@ export async function performance(req: Request, res: Response) {
          FROM tasks
          WHERE assigned_to=$1
            AND created_at::date BETWEEN $2::date AND $3::date
-           AND status <> 'CANCELLED'
+           AND status NOT IN ('CANCELLED','DRAFT')
          ORDER BY created_at ASC, id ASC`,
         [target, periodStart, calculationEnd]
       ),
@@ -4214,7 +4372,7 @@ export async function exportCsv(req: Request, res: Response) {
   const kind = String(req.params.kind); const team = req.user!.role === 'TEAM_LEAD'; const emp = req.user!.employeeId; let rows: any[] = [];
   if (kind === 'employees') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name,e.last_name,e.email,e.phone,e.job_title,d.name department,e.joining_date,e.status FROM employees e LEFT JOIN departments d ON d.id=e.department_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY e.employee_code`, team ? [emp] : [])).rows;
   else if (kind === 'attendance') rows = (await query<any>(`SELECT a.work_date,e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,d.name department,a.status,a.attendance_mode,a.check_in,a.check_out,a.total_hours,a.location_text,a.location_verified FROM attendance a JOIN employees e ON e.id=a.employee_id LEFT JOIN departments d ON d.id=e.department_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY a.work_date DESC`, team ? [emp] : [])).rows;
-  else if (kind === 'tasks') rows = (await query<any>(`SELECT t.id,t.title,e.employee_code,e.user_type,e.first_name||' '||e.last_name assignee,d.name department,t.assignment_scope,t.priority,CASE WHEN t.due_date<now() AND t.status NOT IN('COMPLETED','CANCELLED') THEN 'OVERDUE' ELSE t.status END status,t.progress,t.start_date,t.due_date,t.completed_at,c.first_name||' '||c.last_name uploaded_by FROM tasks t JOIN employees e ON e.id=t.assigned_to LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees c ON c.id=t.created_by ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY t.created_at DESC`, team ? [emp] : [])).rows;
+  else if (kind === 'tasks') rows = (await query<any>(`SELECT t.id,t.title,e.employee_code,e.user_type,e.first_name||' '||e.last_name assignee,d.name department,t.assignment_scope,t.priority,CASE WHEN t.due_date<now() AND t.status NOT IN('COMPLETED','CANCELLED','DRAFT') THEN 'OVERDUE' ELSE t.status END status,t.progress,t.start_date,t.due_date,t.completed_at,c.first_name||' '||c.last_name uploaded_by FROM tasks t JOIN employees e ON e.id=t.assigned_to LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees c ON c.id=t.created_by ${team ? "WHERE e.team_lead_id=$1 AND t.status <> 'DRAFT'" : "WHERE t.status <> 'DRAFT'"} ORDER BY t.created_at DESC`, team ? [emp] : [])).rows;
   else if (kind === 'performance') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,p.period_start,p.period_end,p.task_completion,p.on_time,p.attendance,p.working_hours,p.required_work_hours,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY p.period_end DESC,p.created_at DESC`, team ? [emp] : [])).rows;
   else return res.status(400).json({ message: 'Unknown export type' });
   const escape = (v: any) => `"${String(v ?? '').replaceAll('"', '""')}"`; const headers = rows[0] ? Object.keys(rows[0]) : []; const csv = [headers.map(escape).join(','), ...rows.map(row => headers.map(h => escape(row[h])).join(','))].join('\n');

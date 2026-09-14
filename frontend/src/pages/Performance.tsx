@@ -97,7 +97,7 @@ export default function Performance() {
       // the card is synchronized with the newest saved performance row.
       await load();
 
-      setMsg('Performance recalculated successfully.');
+      setMsg('Performance recalculated using Task and Attendance criteria.');
     } catch (e) {
       setMsg(messageOf(e));
     } finally {
@@ -127,7 +127,7 @@ export default function Performance() {
       await load();
 
       setMsg(
-        'Performance recalculated successfully for all accessible employees.'
+        'Performance recalculated for all accessible employees using Task and Attendance criteria.'
       );
     } catch (e) {
       setMsg(messageOf(e));
@@ -157,7 +157,7 @@ export default function Performance() {
     <>
       <PageTitle
         title="Performance Management"
-        subtitle="Final performance = 100% − task deduction − leave deduction"
+        subtitle="Performance is calculated only from Task Performance and Attendance Performance"
         action={
           user?.role === 'EMPLOYEE' ? (
             <button
@@ -284,20 +284,40 @@ export default function Performance() {
               target !== '' &&
               String(r.employee_id) === String(target);
 
-            const score = clampScore(r.score);
+            const taskPerformance = clampScore(r.task_completion);
+            const attendancePerformance = clampScore(r.attendance);
+
+            const taskDeduction = clampScore(
+              r.task_deduction !== undefined && r.task_deduction !== null
+                ? r.task_deduction
+                : 100 - taskPerformance
+            );
+
+            const attendanceDeduction = clampScore(
+              r.attendance_deduction !== undefined && r.attendance_deduction !== null
+                ? r.attendance_deduction
+                : 100 - attendancePerformance
+            );
+
+            const totalDeduction = clampScore(
+              r.deductions !== undefined && r.deductions !== null
+                ? r.deductions
+                : taskDeduction + attendanceDeduction
+            );
+
+            const score = clampScore(
+              r.score !== undefined && r.score !== null
+                ? r.score
+                : 100 - totalDeduction
+            );
 
             const metrics = [
-              ['Task completion', r.task_completion],
-              ['Attendance', r.attendance],
-              ['Working hours', r.working_hours],
-              ['Task deduction', r.task_deduction],
-              ['Leave deduction', r.leave_deduction],
-              ['Total deductions', r.deductions],
+              ['Task performance', taskPerformance],
+              ['Attendance performance', attendancePerformance],
+              ['Task deduction', taskDeduction],
+              ['Attendance deduction', attendanceDeduction],
+              ['Total deduction', totalDeduction],
             ];
-
-            const requiredWorkHours = Number.isFinite(Number(r.required_work_hours))
-              ? Number(r.required_work_hours)
-              : 3;
 
             return (
               <div
@@ -465,14 +485,42 @@ export default function Performance() {
                       `
                   }
                 >
-                  <div className="flex items-center justify-between gap-3">
-                    <span>Required work hours</span>
-                    <b className={isSelected ? 'text-cyan-700' : 'text-black'}>
-                      {requiredWorkHours.toFixed(2)} hrs/day
-                    </b>
+                  <div className="font-extrabold">
+                    Performance rules
                   </div>
-                  <div className="mt-1">
-                    Task deduction and leave deduction are calculated separately. Their sum is deducted from 100%.
+
+                  <div className="mt-2 space-y-1 leading-5">
+                    <div>
+                      <b>Task Performance:</b> average of all task scores for the selected month.
+                    </div>
+
+                    <div>
+                      <b>Attendance Performance:</b> calculated from the actual working days of the selected month.
+                    </div>
+
+                    <div>
+                      Sundays are excluded automatically.
+                    </div>
+
+                    <div>
+                      Daily attendance is proportional to the required working hours configured for that day.
+                    </div>
+
+                    <div>
+                      Approved <b>PAID leave</b> causes no attendance deduction.
+                    </div>
+
+                    <div>
+                      Other approved leave types still reduce attendance performance.
+                    </div>
+
+                    <div>
+                      A missed past working day is treated as absent.
+                    </div>
+                  </div>
+
+                  <div className="mt-3 border-t border-slate-200 pt-2 font-bold">
+                    Final Performance = 100% − Task Deduction − Attendance Deduction
                   </div>
                 </div>
               </div>

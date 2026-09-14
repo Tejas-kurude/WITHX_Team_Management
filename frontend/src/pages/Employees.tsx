@@ -4,6 +4,24 @@ import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
 import { useSearchParams } from 'react-router-dom';
 
+const API_ORIGIN = String(
+  import.meta.env.VITE_API_URL || 'http://localhost:5000/api'
+).replace(/\/api\/?$/, '');
+
+function employeePhotoUrl(value: string | null | undefined) {
+  if (!value) return '';
+
+  if (
+    value.startsWith('http://') ||
+    value.startsWith('https://') ||
+    value.startsWith('data:')
+  ) {
+    return value;
+  }
+
+  return `${API_ORIGIN}${value.startsWith('/') ? value : `/${value}`}`;
+}
+
 export default function Employees() {
   const { user } = useAuth();
   const [searchParams] = useSearchParams();
@@ -20,6 +38,11 @@ export default function Employees() {
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [selectedEmployee, setSelectedEmployee] = useState<any | null>(null);
+
+  const [photoPreview, setPhotoPreview] = useState('');
+  const [photoFileData, setPhotoFileData] = useState('');
+  const [photoFileName, setPhotoFileName] = useState('');
+  const [fullImageUrl, setFullImageUrl] = useState('');
 
   const [deleteUser, setDeleteUser] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -68,9 +91,17 @@ export default function Employees() {
 
     setErr('');
 
-    const body = Object.fromEntries(
+    const body: any = Object.fromEntries(
       new FormData(e.currentTarget).entries()
     );
+
+    // File input itself is not sent. We send a validated base64 payload instead.
+    delete body.profilePhoto;
+
+    if (photoFileData && photoFileName) {
+      body.photoFileData = photoFileData;
+      body.photoFileName = photoFileName;
+    }
 
     try {
       if (editing) {
@@ -81,6 +112,9 @@ export default function Employees() {
 
       setShow(false);
       setEditing(null);
+      setPhotoPreview('');
+      setPhotoFileData('');
+      setPhotoFileName('');
 
       await load();
     } catch (e) {
@@ -127,6 +161,9 @@ export default function Employees() {
               onClick={() => {
                 setEditing(null);
                 setSelectedRole('EMPLOYEE');
+                setPhotoPreview('');
+                setPhotoFileData('');
+                setPhotoFileName('');
                 setShow(true);
               }}
             >
@@ -311,6 +348,9 @@ export default function Employees() {
                             e.stopPropagation();
                             setEditing(r);
                             setSelectedRole(r.role || 'EMPLOYEE');
+                            setPhotoPreview(employeePhotoUrl(r.photo_url));
+                            setPhotoFileData('');
+                            setPhotoFileName('');
                             setShow(true);
                           }}
                         >
@@ -355,6 +395,9 @@ export default function Employees() {
             setShow(false);
             setEditing(null);
             setSelectedRole('EMPLOYEE');
+            setPhotoPreview('');
+            setPhotoFileData('');
+            setPhotoFileName('');
             setErr('');
           }}
         >
@@ -538,19 +581,86 @@ export default function Employees() {
 
             <div className="sm:col-span-2">
               <label className="label">
-                Profile Photo URL
+                Profile Photo
               </label>
 
-              <input
-                className="input mt-1"
-                name="photoUrl"
-                type="url"
-                placeholder="https://example.com/photo.jpg"
-                defaultValue={editing?.photo_url || ''}
-              />
+              <div className="mt-2 flex flex-col gap-4 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:flex-row sm:items-center">
 
-              <div className="mt-1 text-xs muted">
-                Paste the employee profile photo URL.
+                {(photoPreview || editing?.photo_url) ? (
+                  <img
+                    src={
+                      photoPreview ||
+                      employeePhotoUrl(editing?.photo_url)
+                    }
+                    alt="Profile preview"
+                    className="h-24 w-24 shrink-0 rounded-full border-4 border-white object-cover shadow-sm"
+                  />
+                ) : (
+                  <div className="flex h-24 w-24 shrink-0 items-center justify-center rounded-full bg-white text-2xl font-extrabold text-slate-500 shadow-sm">
+                    {editing?.first_name?.charAt(0)?.toUpperCase() || '?'}
+                    {editing?.last_name?.charAt(0)?.toUpperCase() || ''}
+                  </div>
+                )}
+
+                <div className="flex-1">
+                  <input
+                    className="input"
+                    name="profilePhoto"
+                    type="file"
+                    accept="image/png,image/jpeg,image/webp"
+                    onChange={e => {
+                      const file = e.target.files?.[0];
+
+                      if (!file) return;
+
+                      if (
+                        ![
+                          'image/png',
+                          'image/jpeg',
+                          'image/webp'
+                        ].includes(file.type)
+                      ) {
+                        setErr('Profile photo must be JPG, PNG or WEBP.');
+                        e.currentTarget.value = '';
+                        return;
+                      }
+
+                      if (file.size > 2 * 1024 * 1024) {
+                        setErr('Profile photo must be 2 MB or smaller.');
+                        e.currentTarget.value = '';
+                        return;
+                      }
+
+                      const reader = new FileReader();
+
+                      reader.onload = () => {
+                        const result = String(reader.result || '');
+
+                        setPhotoFileData(result);
+                        setPhotoFileName(file.name);
+                        setPhotoPreview(result);
+                        setErr('');
+                      };
+
+                      reader.onerror = () => {
+                        setErr('Could not read the selected profile photo.');
+                      };
+
+                      reader.readAsDataURL(file);
+                    }}
+                  />
+
+                  <div className="mt-2 text-xs muted">
+                    Choose a JPG, PNG or WEBP image from your computer. Maximum size: 2 MB.
+                  </div>
+
+                  {photoFileName && (
+                    <div className="mt-2 text-xs font-semibold text-slate-700">
+                      Selected: {photoFileName}
+                    </div>
+                  )}
+                </div>
+
               </div>
             </div>
 
@@ -684,6 +794,9 @@ export default function Employees() {
                   setShow(false);
                   setEditing(null);
                   setSelectedRole('EMPLOYEE');
+                  setPhotoPreview('');
+                  setPhotoFileData('');
+                  setPhotoFileName('');
                   setErr('');
                 }}
               >
@@ -714,16 +827,28 @@ export default function Employees() {
             <div className="flex flex-col items-center gap-4 border-b border-slate-200 pb-6 sm:flex-row">
 
               {selectedEmployee.photo_url ? (
-                <img
-                  src={selectedEmployee.photo_url}
-                  alt={`${selectedEmployee.first_name} ${selectedEmployee.last_name}`}
-                  className="h-28 w-28 rounded-full border-4 border-white object-cover shadow-md"
-                  onError={e => {
-                    e.currentTarget.style.display = 'none';
-                  }}
-                />
+                <button
+                  type="button"
+                  className="group relative shrink-0 rounded-full"
+                  onClick={() =>
+                    setFullImageUrl(
+                      employeePhotoUrl(selectedEmployee.photo_url)
+                    )
+                  }
+                  title="Click to view full image"
+                >
+                  <img
+                    src={employeePhotoUrl(selectedEmployee.photo_url)}
+                    alt={`${selectedEmployee.first_name} ${selectedEmployee.last_name}`}
+                    className="h-28 w-28 rounded-full border-4 border-white object-cover shadow-md transition group-hover:scale-[1.03]"
+                  />
+
+                  <span className="absolute inset-x-2 bottom-1 rounded-full bg-black/60 px-2 py-1 text-[10px] font-semibold text-white opacity-0 transition group-hover:opacity-100">
+                    View photo
+                  </span>
+                </button>
               ) : (
-                <div className="flex h-28 w-28 items-center justify-center rounded-full bg-slate-100 text-3xl font-extrabold text-slate-700 shadow-sm">
+                <div className="flex h-28 w-28 shrink-0 items-center justify-center rounded-full bg-slate-100 text-3xl font-extrabold text-slate-700 shadow-sm">
                   {selectedEmployee.first_name?.charAt(0)?.toUpperCase()}
                   {selectedEmployee.last_name?.charAt(0)?.toUpperCase()}
                 </div>
@@ -850,6 +975,9 @@ export default function Employees() {
                   onClick={() => {
                     setEditing(selectedEmployee);
                     setSelectedRole(selectedEmployee.role || 'EMPLOYEE');
+                    setPhotoPreview(employeePhotoUrl(selectedEmployee.photo_url));
+                    setPhotoFileData('');
+                    setPhotoFileName('');
                     setSelectedEmployee(null);
                     setShow(true);
                   }}
@@ -862,6 +990,35 @@ export default function Employees() {
 
           </div>
         </Modal>
+      )}
+
+      {/* FULL PROFILE PHOTO */}
+      {fullImageUrl && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setFullImageUrl('')}
+        >
+          <div
+            className="relative flex max-h-[92vh] max-w-[92vw] items-center justify-center"
+            onClick={e => e.stopPropagation()}
+          >
+            <img
+              src={fullImageUrl}
+              alt="Full profile"
+              className="max-h-[90vh] max-w-[90vw] rounded-2xl bg-white object-contain shadow-2xl"
+            />
+
+            <button
+              type="button"
+              className="absolute -right-3 -top-3 flex h-10 w-10 items-center justify-center rounded-full bg-white text-xl font-bold text-slate-800 shadow-lg hover:bg-slate-100"
+              onClick={() => setFullImageUrl('')}
+              aria-label="Close full profile image"
+              title="Close"
+            >
+              ×
+            </button>
+          </div>
+        </div>
       )}
 
       {/* DELETE CONFIRMATION MODAL */}
