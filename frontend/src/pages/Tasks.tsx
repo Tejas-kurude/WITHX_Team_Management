@@ -375,7 +375,7 @@ export default function Tasks() {
                 : task
             )
           );
-          setSelectedTask((prev) =>
+          setSelectedTask((prev: any) =>
             prev && Number(prev.id) === Number(editing.id)
               ? mergeTaskUpdate(prev, updatedTask)
               : prev
@@ -437,7 +437,7 @@ export default function Tasks() {
               : task
           )
         );
-        setSelectedTask((prev) =>
+        setSelectedTask((prev: any) =>
           prev && Number(prev.id) === Number(id)
             ? mergeTaskUpdate(prev, response.data)
             : prev
@@ -469,7 +469,7 @@ export default function Tasks() {
               : task
           )
         );
-        setSelectedTask((prev) =>
+        setSelectedTask((prev: any) =>
           prev && Number(prev.id) === Number(id)
             ? mergeTaskUpdate(prev, response.data)
             : prev
@@ -538,7 +538,7 @@ export default function Tasks() {
         proofUrl,
       });
 
-      setSelectedTask((prev) =>
+      setSelectedTask((prev: any) =>
         prev && Number(prev.id) === Number(submitTask.id)
           ? {
               ...prev,
