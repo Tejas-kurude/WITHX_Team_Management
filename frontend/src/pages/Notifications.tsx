@@ -1,390 +1,1753 @@
-import { FormEvent, useEffect, useState } from 'react';
-import { api, messageOf } from '../services/api';
-import { Empty, Modal, PageTitle } from '../components/UI';
+import {
+  FormEvent,
+  useEffect,
+  useMemo,
+  useState
+} from 'react';
+
+import { useSearchParams } from 'react-router-dom';
+
+import {
+  api,
+  messageOf
+} from '../services/api';
+
+import {
+  Modal,
+  PageTitle
+} from '../components/UI';
+
 import { useAuth } from '../context/AuthContext';
+
 
 export default function Notifications() {
   const { user } = useAuth();
-  const isSuper = user?.role === 'SUPER_ADMIN';
 
-  const [rows, setRows] = useState<any[]>([]);
-  const [editing, setEditing] = useState<any | null>(null);
-  const [selected, setSelected] = useState<any | null>(null);
-  const [confirmClear, setConfirmClear] = useState(false);
+  const isSuper =
+    user?.role === 'SUPER_ADMIN';
 
-  const [deleteNotification, setDeleteNotification] = useState<any | null>(null);
-  const [deleting, setDeleting] = useState(false);
+  const [searchParams] =
+    useSearchParams();
 
-  const [pageErr, setPageErr] = useState('');
-  const [err, setErr] = useState('');
+
+  /* =========================================================
+     DATA
+  ========================================================= */
+
+  const [rows, setRows] =
+    useState<any[]>([]);
+
+  const [unreadCount, setUnreadCount] =
+    useState(0);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [pageErr, setPageErr] =
+    useState('');
+
+
+  /* =========================================================
+     DETAILS / EDIT / DELETE
+  ========================================================= */
+
+  const [selected, setSelected] =
+    useState<any | null>(null);
+
+  const [editing, setEditing] =
+    useState<any | null>(null);
+
+  const [deleteNotification, setDeleteNotification] =
+    useState<any | null>(null);
+
+  const [confirmClear, setConfirmClear] =
+    useState(false);
+
+  const [deleting, setDeleting] =
+    useState(false);
+
+  const [clearing, setClearing] =
+    useState(false);
+
+  const [err, setErr] =
+    useState('');
+
+
+  /* =========================================================
+     FILTERS
+  ========================================================= */
+
+  const [search, setSearch] =
+    useState('');
+
+  const [typeFilter, setTypeFilter] =
+    useState('ALL');
+
+  const [readFilter, setReadFilter] =
+    useState(
+      searchParams.get('status') === 'UNREAD'
+        ? 'UNREAD'
+        : 'ALL'
+    );
+
+  const [dateFilter, setDateFilter] =
+    useState('');
+
+  const [notificationClickTimer, setNotificationClickTimer] =
+    useState<ReturnType<typeof setTimeout> | null>(null);
+
+
+  /* =========================================================
+     LOAD NOTIFICATIONS
+  ========================================================= */
 
   async function load() {
     try {
+      setLoading(true);
       setPageErr('');
-      const r = await api.get('/notifications');
-      setRows(r.data);
+
+      const [
+        notificationsResponse,
+        unreadResponse
+      ] = await Promise.all([
+        api.get('/notifications'),
+
+        api.get(
+          '/notifications/unread-count'
+        )
+      ]);
+
+      setRows(
+        Array.isArray(
+          notificationsResponse.data
+        )
+          ? notificationsResponse.data
+          : []
+      );
+
+      setUnreadCount(
+        Number(
+          unreadResponse.data
+            ?.unreadCount || 0
+        )
+      );
+
     } catch (e) {
-      setPageErr(messageOf(e));
+
+      setPageErr(
+        messageOf(e)
+      );
+
+    } finally {
+
+      setLoading(false);
     }
   }
+
 
   useEffect(() => {
     void load();
   }, []);
 
-  async function read(id: number) {
-    try {
-      await api.put(`/notifications/${id}/read`);
-      await load();
-    } catch (e) {
-      setPageErr(messageOf(e));
+
+  /* =========================================================
+     NOTIFICATION CATEGORY
+  ========================================================= */
+
+  function notificationCategory(
+    notification: any
+  ) {
+    const type =
+      String(
+        notification.type || ''
+      ).toUpperCase();
+
+    if (
+      type.startsWith('TASK')
+    ) {
+      return 'TASK';
+    }
+
+    if (
+      type.startsWith('LEAVE')
+    ) {
+      return 'LEAVE';
+    }
+
+    if (
+      type.includes('ATTENDANCE')
+    ) {
+      return 'ATTENDANCE';
+    }
+
+    if (
+      type.includes('REPORT')
+    ) {
+      return 'REPORT';
+    }
+
+    if (
+      type.includes('PERFORMANCE')
+    ) {
+      return 'PERFORMANCE';
+    }
+
+    return 'SYSTEM';
+  }
+
+
+  function typeStyle(
+    type: string
+  ) {
+    switch (type) {
+
+      case 'TASK':
+        return (
+          'border-blue-200 ' +
+          'bg-blue-50 ' +
+          'text-blue-700'
+        );
+
+      case 'LEAVE':
+        return (
+          'border-purple-200 ' +
+          'bg-purple-50 ' +
+          'text-purple-700'
+        );
+
+      case 'ATTENDANCE':
+        return (
+          'border-green-200 ' +
+          'bg-green-50 ' +
+          'text-green-700'
+        );
+
+      case 'REPORT':
+        return (
+          'border-amber-200 ' +
+          'bg-amber-50 ' +
+          'text-amber-700'
+        );
+
+      case 'PERFORMANCE':
+        return (
+          'border-orange-200 ' +
+          'bg-orange-50 ' +
+          'text-orange-700'
+        );
+
+      default:
+        return (
+          'border-slate-200 ' +
+          'bg-slate-100 ' +
+          'text-slate-700'
+        );
     }
   }
 
-  async function openNotification(notification: any) {
-    setSelected(notification);
 
-    if (!notification.is_read) {
-      await read(notification.id);
+  /* =========================================================
+     DATE HELPERS
+  ========================================================= */
+
+  function formatDate(
+    value: string
+  ) {
+    if (!value) return '—';
+
+    return new Date(
+      value
+    ).toLocaleDateString(
+      [],
+      {
+        day: '2-digit',
+        month: 'short',
+        year: 'numeric'
+      }
+    );
+  }
+
+
+  function formatTime(
+    value: string
+  ) {
+    if (!value) return '—';
+
+    return new Date(
+      value
+    ).toLocaleTimeString(
+      [],
+      {
+        hour: '2-digit',
+        minute: '2-digit'
+      }
+    );
+  }
+
+
+  function shortText(
+    value: string,
+    limit = 100
+  ) {
+    if (!value) {
+      return '—';
     }
-  }
 
-  async function clearAll() {
-    if (!rows.length) return;
-    setConfirmClear(true);
-  }
-
-  async function confirmClearAll() {
-    try {
-      setPageErr('');
-      await api.delete('/notifications');
-      setRows([]);
-      setSelected(null);
-      setConfirmClear(false);
-    } catch (e) {
-      setPageErr(messageOf(e));
+    if (
+      value.length <= limit
+    ) {
+      return value;
     }
+
+    return (
+      value.slice(
+        0,
+        limit
+      ) + '...'
+    );
   }
 
-  async function save(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    setErr('');
 
-    if (!editing) return;
+  /* =========================================================
+     FILTERED DATA
+  ========================================================= */
 
-    try {
-      await api.put(
-        `/notifications/${editing.id}`,
-        Object.fromEntries(new FormData(e.currentTarget).entries())
+  const filteredRows =
+    useMemo(() => {
+
+      const q =
+        search
+          .trim()
+          .toLowerCase();
+
+      return rows.filter(
+        notification => {
+
+          const category =
+            notificationCategory(
+              notification
+            );
+
+          const matchesSearch =
+            !q ||
+
+            String(
+              notification.title || ''
+            )
+              .toLowerCase()
+              .includes(q) ||
+
+            String(
+              notification.message || ''
+            )
+              .toLowerCase()
+              .includes(q);
+
+
+          const matchesType =
+            typeFilter === 'ALL' ||
+            category ===
+              typeFilter;
+
+
+          const matchesRead =
+            readFilter === 'ALL' ||
+
+            (
+              readFilter === 'UNREAD' &&
+              !notification.is_read
+            ) ||
+
+            (
+              readFilter === 'READ' &&
+              notification.is_read
+            );
+
+
+          const matchesDate =
+            !dateFilter ||
+
+            (
+              notification.created_at &&
+
+              new Date(
+                notification.created_at
+              )
+                .toLocaleDateString(
+                  'en-CA'
+                ) ===
+                dateFilter
+            );
+
+
+          return (
+            matchesSearch &&
+            matchesType &&
+            matchesRead &&
+            matchesDate
+          );
+        }
       );
 
-      setEditing(null);
-      await load();
+    }, [
+      rows,
+      search,
+      typeFilter,
+      readFilter,
+      dateFilter
+    ]);
+
+
+  /* =========================================================
+     VIEW DETAILS / MARK READ
+  ========================================================= */
+
+  async function openNotification(
+    notification: any
+  ) {
+    setSelected(
+      notification
+    );
+
+    if (
+      notification.is_read
+    ) {
+      return;
+    }
+
+    try {
+
+      await api.put(
+        `/notifications/${notification.id}/read`
+      );
+
+
+      setRows(
+        current =>
+          current.map(
+            item =>
+              item.id ===
+              notification.id
+
+                ? {
+                    ...item,
+                    is_read: true
+                  }
+
+                : item
+          )
+      );
+
+
+      setSelected({
+        ...notification,
+        is_read: true
+      });
+
+
+      setUnreadCount(
+        current =>
+          Math.max(
+            0,
+            current - 1
+          )
+      );
+
     } catch (e) {
-      setErr(messageOf(e));
+
+      setPageErr(
+        messageOf(e)
+      );
     }
   }
 
+
+  /* =========================================================
+     DELETE ONE
+  ========================================================= */
+
   async function remove() {
-    if (!deleteNotification) return;
+    if (
+      !deleteNotification
+    ) {
+      return;
+    }
 
     try {
+
       setDeleting(true);
       setPageErr('');
+
 
       await api.delete(
         `/notifications/${deleteNotification.id}`
       );
 
-      setDeleteNotification(null);
-      await load();
+
+      const wasUnread =
+        !deleteNotification.is_read;
+
+
+      setRows(
+        current =>
+          current.filter(
+            item =>
+              item.id !==
+              deleteNotification.id
+          )
+      );
+
+
+      if (wasUnread) {
+
+        setUnreadCount(
+          current =>
+            Math.max(
+              0,
+              current - 1
+            )
+        );
+      }
+
+
+      if (
+        selected?.id ===
+        deleteNotification.id
+      ) {
+        setSelected(null);
+      }
+
+
+      setDeleteNotification(
+        null
+      );
+
     } catch (e) {
-      setPageErr(messageOf(e));
+
+      setPageErr(
+        messageOf(e)
+      );
+
     } finally {
+
       setDeleting(false);
     }
   }
 
-  function getNotificationType(notification: any) {
-    const text =
-      `${notification.title ?? ''} ${notification.message ?? ''}`.toLowerCase();
 
-    if (text.includes('leave')) return 'LEAVE';
+  /* =========================================================
+     CLEAR ALL
+  ========================================================= */
 
-    if (
-      text.includes('attendance') ||
-      text.includes('check-in') ||
-      text.includes('checkout')
-    ) {
-      return 'ATTENDANCE';
-    }
+  async function clearAll() {
+    try {
 
-    if (text.includes('report')) return 'REPORT';
-    if (text.includes('performance')) return 'PERFORMANCE';
-    if (text.includes('task')) return 'TASK';
+      setClearing(true);
+      setPageErr('');
 
-    return 'SYSTEM';
-  }
 
-  function getTypeStyle(type: string) {
-    switch (type) {
-      case 'TASK':
-        return 'bg-blue-50 text-blue-700';
+      await api.delete(
+        '/notifications'
+      );
 
-      case 'LEAVE':
-        return 'bg-purple-50 text-purple-700';
 
-      case 'ATTENDANCE':
-        return 'bg-green-50 text-green-700';
+      setRows([]);
 
-      case 'REPORT':
-        return 'bg-amber-50 text-amber-700';
+      setUnreadCount(0);
 
-      case 'PERFORMANCE':
-        return 'bg-orange-50 text-orange-700';
+      setSelected(null);
 
-      default:
-        return 'bg-gray-100 text-gray-700';
+      setConfirmClear(false);
+
+    } catch (e) {
+
+      setPageErr(
+        messageOf(e)
+      );
+
+    } finally {
+
+      setClearing(false);
     }
   }
 
-  function formatDate(date: string) {
-    const created = new Date(date);
-    const now = new Date();
 
-    const diff = now.getTime() - created.getTime();
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
+  /* =========================================================
+     EDIT
+     SUPER ADMIN ONLY
+  ========================================================= */
 
-    if (minutes < 1) {
-      return 'Just now';
+  async function saveEdit(
+    e: FormEvent<HTMLFormElement>
+  ) {
+    e.preventDefault();
+
+    if (!editing) return;
+
+    try {
+
+      setErr('');
+
+
+      const body =
+        Object.fromEntries(
+          new FormData(
+            e.currentTarget
+          ).entries()
+        );
+
+
+      await api.put(
+        `/notifications/${editing.id}`,
+        body
+      );
+
+
+      setEditing(null);
+
+      await load();
+
+    } catch (e) {
+
+      setErr(
+        messageOf(e)
+      );
     }
-
-    if (minutes < 60) {
-      return `${minutes} minute${minutes === 1 ? '' : 's'} ago`;
-    }
-
-    if (hours < 24) {
-      return `${hours} hour${hours === 1 ? '' : 's'} ago`;
-    }
-
-    const isToday =
-      created.toDateString() === now.toDateString();
-
-    if (isToday) {
-      return `Today, ${created.toLocaleTimeString([], {
-        hour: '2-digit',
-        minute: '2-digit',
-      })}`;
-    }
-
-    return created.toLocaleString([], {
-      day: '2-digit',
-      month: 'short',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
   }
 
-  const unreadCount = rows.filter(
-    n => !n.is_read
-  ).length;
+
+  /* =========================================================
+     RESET FILTERS
+  ========================================================= */
+
+  function resetFilters() {
+    setSearch('');
+    setTypeFilter('ALL');
+    setReadFilter('ALL');
+    setDateFilter('');
+  }
+
+  function handleUnreadSingleClick() {
+    if (notificationClickTimer) {
+      clearTimeout(notificationClickTimer);
+    }
+
+    const timer = setTimeout(() => {
+      setReadFilter('UNREAD');
+      setNotificationClickTimer(null);
+    }, 250);
+
+    setNotificationClickTimer(timer);
+  }
+
+  function handleUnreadDoubleClick() {
+    if (notificationClickTimer) {
+      clearTimeout(notificationClickTimer);
+      setNotificationClickTimer(null);
+    }
+
+    setReadFilter('ALL');
+  }
+
+
+  /* =========================================================
+     UI
+  ========================================================= */
 
   return (
     <>
+
+      {/* =====================================================
+          PAGE TITLE
+      ===================================================== */}
+
       <PageTitle
         title="Notifications"
         subtitle="Stay informed about tasks, approvals, attendance, leave requests, reports and important system updates."
         action={
-          <button
-            type="button"
-            className="btn btn-primary"
-            disabled={!rows.length}
-            onClick={() => void clearAll()}
-          >
-            Clear All
-          </button>
+          <div className="flex items-center gap-3">
+
+            {/* UNREAD COUNT */}
+
+            <button
+              type="button"
+              onClick={handleUnreadSingleClick}
+              onDoubleClick={handleUnreadDoubleClick}
+              title="Single click: show unread notifications. Double click: show all notifications."
+              className={
+                `
+                flex items-center
+                gap-2 rounded-xl
+                border px-4 py-2.5
+                text-sm font-extrabold
+                transition
+                ${
+                  unreadCount > 0
+
+                    ? `
+                      border-red-200
+                      bg-red-50
+                      text-red-700
+                      hover:bg-red-100
+                    `
+
+                    : `
+                      border-slate-200
+                      bg-white
+                      text-slate-600
+                    `
+                }
+                `
+              }
+            >
+
+              <span>
+                🔔
+              </span>
+
+              <span>
+                {unreadCount}
+                {' '}
+                Unread
+              </span>
+
+            </button>
+
+
+            {/* CLEAR ALL */}
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              disabled={
+                rows.length === 0
+              }
+              onClick={() =>
+                setConfirmClear(true)
+              }
+            >
+              Clear All
+            </button>
+
+          </div>
         }
       />
 
-      {/* Notification Summary */}
-      {!pageErr && rows.length > 0 && (
-        <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
 
-          <div className="text-base font-medium muted">
+      {/* =====================================================
+          PAGE ERROR
+      ===================================================== */}
 
-            {unreadCount > 0 ? (
-              <>
-                You have{' '}
-
-                <span className="font-bold text-orange">
-                  {unreadCount} unread notification
-                  {unreadCount !== 1 ? 's' : ''}
-                </span>
-              </>
-            ) : (
-              <span>
-                You're all caught up.
-              </span>
-            )}
-
-          </div>
-
-          <div className="text-sm font-medium muted">
-            {rows.length} notification
-            {rows.length !== 1 ? 's' : ''}
-          </div>
-
-        </div>
-      )}
-
-      {/* Error */}
       {pageErr && (
-        <div className="mb-4 rounded-xl bg-red-50 p-4 text-sm font-medium text-red-700">
+        <div
+          className="
+            mb-4 rounded-xl
+            border border-red-200
+            bg-red-50 p-4
+            text-sm font-semibold
+            text-red-700
+          "
+        >
           {pageErr}
         </div>
       )}
 
-      {/* Notifications */}
-      {rows.length > 0 ? (
-        <div className="space-y-3">
 
-          {rows.map(n => {
-            const type =
-              getNotificationType(n);
+      {/* =====================================================
+          FILTERS
+      ===================================================== */}
 
-            return (
-              <div
-                key={n.id}
-                className={`card w-full p-5 transition ${
-                  n.is_read
-                    ? 'opacity-70'
-                    : 'border-l-4 border-l-orange bg-orange-50/20'
-                }`}
-              >
+      <div
+        className="
+          mb-4 rounded-2xl
+          border border-slate-200
+          bg-white p-4
+        "
+      >
 
-                <div className="flex items-start justify-between gap-5">
+        <div
+          className="
+            grid gap-3
+            lg:grid-cols-12
+          "
+        >
 
-                  {/* Notification Content */}
-                  <button
-                    type="button"
-                    onClick={() => void openNotification(n)}
-                    className="min-w-0 flex-1 text-left"
-                  >
+          {/* SEARCH */}
 
-                    {/* Type + unread */}
-                    <div className="mb-2 flex flex-wrap items-center gap-2">
+          <div
+            className="
+              lg:col-span-5
+            "
+          >
 
-                      <span
-                        className={`rounded-full px-3 py-1.5 text-xs font-extrabold tracking-wide ${getTypeStyle(
-                          type
-                        )}`}
-                      >
-                        {type}
-                      </span>
-
-                      {!n.is_read && (
-                        <span className="flex items-center gap-1.5 text-sm font-bold text-orange">
-
-                          <span className="h-2 w-2 rounded-full bg-orange" />
-
-                          New
-                        </span>
-                      )}
-
-                    </div>
-
-                    {/* Title */}
-                    <div className="text-lg font-extrabold leading-7 text-slate-900">
-                      {n.title}
-                    </div>
-
-                    {/* Employee */}
-                    {n.employee_name && (
-                      <div className="mt-1 text-xs font-bold text-orange">
-                        {n.employee_name}
-                      </div>
-                    )}
-
-                    {/* Message */}
-                    <p className="mt-2 max-w-4xl text-sm leading-6 text-slate-600">
-                      {n.message}
-                    </p>
-
-                    <div className="mt-2 text-xs font-semibold text-cyan-700">
-                      Click to view details
-                    </div>
-
-                    {/* Time */}
-                    <div className="mt-3 text-xs font-medium text-slate-400">
-                      {formatDate(
-                        n.created_at
-                      )}
-                    </div>
-
-                  </button>
-
-                  {/* Actions */}
-                  {isSuper && (
-                    <div className="flex shrink-0 items-center gap-2">
-
-                      <button
-                        type="button"
-                        className="btn !px-4 !py-2 text-sm font-semibold"
-                        onClick={() => {
-                          setErr('');
-                          setEditing(n);
-                        }}
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        type="button"
-                        className="btn !px-5 !py-3 text-sm font-semibold text-red-600"
-                        onClick={() =>
-                          setDeleteNotification(n)
-                        }
-                      >
-                        Delete
-                      </button>
-
-                    </div>
-                  )}
-
-                </div>
-
-              </div>
-            );
-          })}
-
-        </div>
-      ) : (
-        !pageErr && (
-          <div className="card flex min-h-[280px] flex-col items-center justify-center px-6 text-center">
-
-            <div className="mb-3 text-4xl">
-              🔔
-            </div>
-
-            <h3 className="text-lg font-extrabold text-slate-900">
-              No notifications yet
-            </h3>
-
-            <p className="mt-2 max-w-md text-sm leading-6 muted">
-              You're all caught up. New task updates,
-              approvals, leave requests, attendance
-              alerts, reports and important system
-              updates will appear here.
-            </p>
+            <input
+              className="input w-full"
+              value={search}
+              onChange={
+                e =>
+                  setSearch(
+                    e.target.value
+                  )
+              }
+              placeholder="Search notification or message"
+            />
 
           </div>
-        )
+
+
+          {/* TYPE */}
+
+          <div
+            className="
+              lg:col-span-2
+            "
+          >
+
+            <select
+              className="input w-full"
+              value={typeFilter}
+              onChange={
+                e =>
+                  setTypeFilter(
+                    e.target.value
+                  )
+              }
+            >
+
+              <option value="ALL">
+                All types
+              </option>
+
+              <option value="TASK">
+                Task
+              </option>
+
+              <option value="LEAVE">
+                Leave
+              </option>
+
+              <option value="ATTENDANCE">
+                Attendance
+              </option>
+
+              <option value="REPORT">
+                Report
+              </option>
+
+              <option value="PERFORMANCE">
+                Performance
+              </option>
+
+              <option value="SYSTEM">
+                System
+              </option>
+
+            </select>
+
+          </div>
+
+
+          {/* READ STATUS */}
+
+          <div
+            className="
+              lg:col-span-2
+            "
+          >
+
+            <select
+              className="input w-full"
+              value={readFilter}
+              onChange={
+                e =>
+                  setReadFilter(
+                    e.target.value
+                  )
+              }
+            >
+
+              <option value="ALL">
+                All notifications
+              </option>
+
+              <option value="UNREAD">
+                Unread only
+              </option>
+
+              <option value="READ">
+                Read only
+              </option>
+
+            </select>
+
+          </div>
+
+
+          {/* DATE */}
+
+          <div
+            className="
+              lg:col-span-2
+            "
+          >
+
+            <input
+              type="date"
+              className="input w-full"
+              value={dateFilter}
+              onChange={
+                e =>
+                  setDateFilter(
+                    e.target.value
+                  )
+              }
+            />
+
+          </div>
+
+
+          {/* RESET */}
+
+          <div
+            className="
+              lg:col-span-1
+            "
+          >
+
+            <button
+              type="button"
+              className="btn w-full"
+              onClick={
+                resetFilters
+              }
+            >
+              Reset
+            </button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+
+      {/* =====================================================
+          SUMMARY
+      ===================================================== */}
+
+      {!loading &&
+        rows.length > 0 && (
+
+        <div
+          className="
+            mb-4 flex
+            flex-wrap
+            items-center
+            justify-between
+            gap-3
+            rounded-xl
+            border border-slate-200
+            bg-white
+            px-4 py-3
+          "
+        >
+
+          <div
+            className="
+              text-sm
+              font-semibold
+              text-slate-600
+            "
+          >
+
+            {unreadCount > 0
+
+              ? (
+                <>
+                  <span
+                    className="
+                      font-extrabold
+                      text-red-600
+                    "
+                  >
+                    {unreadCount}
+                  </span>
+
+                  {' '}
+
+                  unread notification
+                  {unreadCount !== 1
+                    ? 's'
+                    : ''}
+                </>
+              )
+
+              : (
+                <>
+                  You're all caught up.
+                </>
+              )}
+
+          </div>
+
+
+          <div
+            className="
+              text-sm
+              font-semibold
+              text-slate-500
+            "
+          >
+            Showing:
+            {' '}
+            {filteredRows.length}
+            {' '}
+            of
+            {' '}
+            {rows.length}
+          </div>
+
+        </div>
       )}
 
-      {/* Edit Modal */}
-      {editing && (
+
+      {/* =====================================================
+          LOADING
+      ===================================================== */}
+
+      {loading && (
+
+        <div
+          className="
+            card flex
+            min-h-[220px]
+            items-center
+            justify-center
+          "
+        >
+          <div
+            className="
+              text-sm
+              font-semibold
+              text-slate-500
+            "
+          >
+            Loading notifications...
+          </div>
+        </div>
+
+      )}
+
+
+      {/* =====================================================
+          TABLE
+      ===================================================== */}
+
+      {!loading &&
+        filteredRows.length > 0 && (
+
+        <div
+          className="
+            card
+            overflow-hidden
+            p-0
+          "
+        >
+
+          <div
+            className="
+              overflow-x-auto
+            "
+          >
+
+            <table
+              className="
+                w-full
+                min-w-[950px]
+                text-left
+              "
+            >
+
+              <thead
+                className="
+                  border-b
+                  border-slate-200
+                  bg-slate-50
+                "
+              >
+
+                <tr
+                  className="
+                    text-xs
+                    font-extrabold
+                    uppercase
+                    tracking-wide
+                    text-slate-500
+                  "
+                >
+
+                  <th
+                    className="
+                      w-[110px]
+                      px-4 py-4
+                      text-center
+                    "
+                  >
+                    Type
+                  </th>
+
+                  <th
+                    className="
+                      px-4 py-4
+                    "
+                  >
+                    Notification
+                  </th>
+
+                  <th
+                    className="
+                      w-[130px]
+                      px-4 py-4
+                      text-center
+                    "
+                  >
+                    Status
+                  </th>
+
+                  <th
+                    className="
+                      px-4 py-4
+                    "
+                  >
+                    Date
+                  </th>
+
+                  <th
+                    className="
+                      px-4 py-4
+                    "
+                  >
+                    Time
+                  </th>
+
+                  <th
+                    className="
+                      px-4 py-4
+                      text-right
+                    "
+                  >
+                    Action
+                  </th>
+
+                </tr>
+
+              </thead>
+
+
+              <tbody
+                className="
+                  divide-y
+                  divide-slate-200
+                "
+              >
+
+                {filteredRows.map(
+                  notification => {
+
+                    const category =
+                      notificationCategory(
+                        notification
+                      );
+
+                    const unread =
+                      !notification.is_read;
+
+
+                    return (
+
+                      <tr
+                        key={
+                          notification.id
+                        }
+                        className={
+                          `
+                          transition
+                          ${
+                            unread
+
+                              ? `
+                                bg-red-50/60
+                                hover:bg-red-50
+                              `
+
+                              : `
+                                bg-white
+                                hover:bg-slate-50
+                              `
+                          }
+                          `
+                        }
+                      >
+
+                        {/* TYPE */}
+
+                        <td
+                          className={
+                            `
+                            relative
+                            px-4 py-4
+                            align-middle
+                            text-center
+
+                            ${
+                              unread
+
+                                ? `
+                                  border-l-4
+                                  border-red-300
+                                `
+
+                                : `
+                                  border-l-4
+                                  border-transparent
+                                `
+                            }
+                            `
+                          }
+                        >
+
+                          <span
+                            className={
+                              `
+                              inline-flex
+                              min-w-[64px]
+                              items-center
+                              justify-center
+                              rounded-full
+                              border
+                              px-2.5 py-1
+                              text-[11px]
+                              font-extrabold
+
+                              ${typeStyle(
+                                category
+                              )}
+                              `
+                            }
+                          >
+                            {category}
+                          </span>
+
+                        </td>
+
+
+                        {/* NOTIFICATION */}
+
+                        <td
+                          className="
+                            max-w-[520px]
+                            px-4 py-4
+                            align-middle
+                          "
+                        >
+
+                          <div
+                            className="
+                              font-extrabold
+                              text-slate-900
+                            "
+                          >
+                            {
+                              notification.title ||
+                              'Notification'
+                            }
+                          </div>
+
+
+                          <div
+                            className="
+                              mt-1
+                              text-sm
+                              leading-5
+                              text-slate-500
+                            "
+                          >
+                            {shortText(
+                              notification.message
+                            )}
+                          </div>
+
+                        </td>
+
+
+                        {/* STATUS */}
+
+                        <td
+                          className="
+                            px-4 py-4
+                            align-middle
+                            text-center
+                          "
+                        >
+
+                          {unread
+
+                            ? (
+                              <span
+                                className="
+                                  inline-flex
+                                  min-w-[62px]
+                                  items-center
+                                  justify-center
+                                  gap-1.5
+                                  rounded-full
+                                  border
+                                  border-red-200
+                                  bg-red-50
+                                  px-2.5 py-1
+                                  text-[11px]
+                                  font-extrabold
+                                  text-red-700
+                                "
+                              >
+
+                                <span
+                                  className="
+                                    h-1.5
+                                    w-1.5
+                                    rounded-full
+                                    bg-red-500
+                                  "
+                                />
+
+                                NEW
+
+                              </span>
+                            )
+
+                            : (
+                              <span
+                                className="
+                                  inline-flex
+                                  min-w-[62px]
+                                  items-center
+                                  justify-center
+                                  rounded-full
+                                  border
+                                  border-slate-200
+                                  bg-slate-100
+                                  px-2.5 py-1
+                                  text-[11px]
+                                  font-extrabold
+                                  text-slate-600
+                                "
+                              >
+                                READ
+                              </span>
+                            )}
+
+                        </td>
+
+
+                        {/* DATE */}
+
+                        <td
+                          className="
+                            whitespace-nowrap
+                            px-4 py-4
+                            align-middle
+                            text-sm
+                            font-semibold
+                            text-slate-700
+                          "
+                        >
+                          {formatDate(
+                            notification.created_at
+                          )}
+                        </td>
+
+
+                        {/* TIME */}
+
+                        <td
+                          className="
+                            whitespace-nowrap
+                            px-4 py-4
+                            align-middle
+                            text-sm
+                            text-slate-600
+                          "
+                        >
+                          {formatTime(
+                            notification.created_at
+                          )}
+                        </td>
+
+
+                        {/* ACTION */}
+
+                        <td
+                          className="
+                            px-4 py-4
+                            align-middle
+                          "
+                        >
+
+                          <div
+                            className="
+                              flex
+                              items-center
+                              justify-end
+                              gap-2
+                            "
+                          >
+
+                            <button
+                              type="button"
+                              className="
+                                btn
+                                !px-3
+                                !py-2
+                                text-xs
+                                font-bold
+                              "
+                              onClick={() =>
+                                void openNotification(
+                                  notification
+                                )
+                              }
+                            >
+                              View Details
+                            </button>
+
+
+                            {isSuper && (
+
+                              <button
+                                type="button"
+                                className="
+                                  btn
+                                  !px-3
+                                  !py-2
+                                  text-xs
+                                  font-bold
+                                  text-cyan-700
+                                "
+                                onClick={() => {
+                                  setErr('');
+
+                                  setEditing(
+                                    notification
+                                  );
+                                }}
+                              >
+                                Edit
+                              </button>
+
+                            )}
+
+
+                            <button
+                              type="button"
+                              className="
+                                btn
+                                !px-3
+                                !py-2
+                                text-xs
+                                font-bold
+                                text-red-600
+                              "
+                              onClick={() =>
+                                setDeleteNotification(
+                                  notification
+                                )
+                              }
+                            >
+                              Delete
+                            </button>
+
+                          </div>
+
+                        </td>
+
+                      </tr>
+                    );
+                  }
+                )}
+
+              </tbody>
+
+            </table>
+
+          </div>
+
+        </div>
+      )}
+
+
+      {/* =====================================================
+          EMPTY STATE
+      ===================================================== */}
+
+      {!loading &&
+        filteredRows.length === 0 &&
+        !pageErr && (
+
+        <div
+          className="
+            card
+            flex
+            min-h-[220px]
+            flex-col
+            items-center
+            justify-center
+            px-6
+            text-center
+          "
+        >
+
+          <div
+            className="
+              mb-3
+              text-4xl
+            "
+          >
+            🔔
+          </div>
+
+
+          <h3
+            className="
+              text-lg
+              font-extrabold
+              text-slate-900
+            "
+          >
+            {
+              rows.length
+
+                ? 'No matching notifications'
+
+                : 'No notifications'
+            }
+          </h3>
+
+
+          <p
+            className="
+              mt-2
+              max-w-md
+              text-sm
+              leading-6
+              text-slate-500
+            "
+          >
+            {
+              rows.length
+
+                ? (
+                  'Try changing the search, type, read status or date filter.'
+                )
+
+                : (
+                  "You're all caught up."
+                )
+            }
+          </p>
+
+        </div>
+      )}
+
+
+      {/* =====================================================
+          DETAILS MODAL
+      ===================================================== */}
+
+      {selected && (
+
+        <Modal
+          title="Notification Details"
+          onClose={() =>
+            setSelected(null)
+          }
+        >
+
+          <div
+            className="
+              space-y-5
+            "
+          >
+
+            <div
+              className="
+                rounded-xl
+                border
+                border-slate-200
+                bg-slate-50
+                p-4
+              "
+            >
+
+              <div
+                className="
+                  flex
+                  flex-wrap
+                  items-center
+                  justify-between
+                  gap-3
+                "
+              >
+
+                <span
+                  className={
+                    `
+                    rounded-full
+                    border
+                    px-3 py-1
+                    text-xs
+                    font-extrabold
+
+                    ${typeStyle(
+                      notificationCategory(
+                        selected
+                      )
+                    )}
+                    `
+                  }
+                >
+                  {
+                    notificationCategory(
+                      selected
+                    )
+                  }
+                </span>
+
+
+                <span
+                  className="
+                    text-xs
+                    font-semibold
+                    text-slate-500
+                  "
+                >
+                  {
+                    selected.created_at
+
+                      ? new Date(
+                          selected.created_at
+                        ).toLocaleString()
+
+                      : '—'
+                  }
+                </span>
+
+              </div>
+
+
+              <div
+                className="
+                  mt-4
+                  text-xl
+                  font-extrabold
+                  text-slate-900
+                "
+              >
+                {
+                  selected.title ||
+                  'Notification'
+                }
+              </div>
+
+            </div>
+
+
+            <div>
+
+              <div
+                className="
+                  text-xs
+                  font-extrabold
+                  uppercase
+                  tracking-wide
+                  text-slate-500
+                "
+              >
+                Details
+              </div>
+
+
+              <div
+                className="
+                  mt-2
+                  whitespace-pre-wrap
+                  break-words
+                  rounded-xl
+                  border
+                  border-slate-200
+                  bg-white
+                  p-4
+                  text-sm
+                  leading-6
+                  text-slate-700
+                "
+              >
+                {
+                  selected.message ||
+                  'No additional details available.'
+                }
+              </div>
+
+            </div>
+
+
+            <div
+              className="
+                flex
+                justify-end
+                gap-2
+              "
+            >
+
+              <button
+                type="button"
+                className="btn"
+                onClick={() => {
+
+                  setSelected(null);
+
+                  setDeleteNotification(
+                    selected
+                  );
+                }}
+              >
+                Delete
+              </button>
+
+
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() =>
+                  setSelected(null)
+                }
+              >
+                Close
+              </button>
+
+            </div>
+
+          </div>
+
+        </Modal>
+      )}
+
+
+      {/* =====================================================
+          EDIT MODAL
+      ===================================================== */}
+
+      {editing && isSuper && (
+
         <Modal
           title="Edit Notification"
           onClose={() => {
@@ -395,63 +1758,105 @@ export default function Notifications() {
 
           <form
             className="space-y-4"
-            onSubmit={save}
+            onSubmit={
+              saveEdit
+            }
           >
 
             <div>
-              <label className="mb-1.5 block text-sm font-bold">
+
+              <label
+                className="
+                  label
+                "
+              >
                 Notification Title
               </label>
 
               <input
-                className="input"
+                className="
+                  input mt-1
+                "
                 name="title"
                 defaultValue={
                   editing.title
                 }
-                placeholder="Enter notification title"
                 required
               />
+
             </div>
 
+
             <div>
-              <label className="mb-1.5 block text-sm font-bold">
+
+              <label
+                className="
+                  label
+                "
+              >
                 Notification Message
               </label>
 
               <textarea
-                className="input min-h-28"
+                className="
+                  input mt-1
+                  min-h-28
+                "
                 name="message"
                 defaultValue={
                   editing.message
                 }
-                placeholder="Enter notification message"
                 required
               />
+
             </div>
 
+
             {err && (
-              <div className="rounded-lg bg-red-50 p-3 text-sm font-medium text-red-600">
+
+              <div
+                className="
+                  rounded-lg
+                  bg-red-50
+                  p-3
+                  text-sm
+                  text-red-700
+                "
+              >
                 {err}
               </div>
+
             )}
 
-            <div className="flex justify-end gap-3 pt-2">
+
+            <div
+              className="
+                flex
+                justify-end
+                gap-2
+              "
+            >
 
               <button
                 type="button"
                 className="btn"
                 onClick={() => {
+
                   setEditing(null);
+
                   setErr('');
                 }}
               >
                 Cancel
               </button>
 
+
               <button
                 type="submit"
-                className="btn btn-primary"
+                className="
+                  btn
+                  btn-primary
+                "
               >
                 Save Changes
               </button>
@@ -463,188 +1868,148 @@ export default function Notifications() {
         </Modal>
       )}
 
-      {/* Notification Details Modal */}
-      {selected && (
-        <Modal
-          title={selected.title || 'Notification Details'}
-          onClose={() => setSelected(null)}
-        >
-          <div className="space-y-4">
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-extrabold ${getTypeStyle(
-                    getNotificationType(selected)
-                  )}`}
-                >
-                  {getNotificationType(selected)}
-                </span>
 
-                {!selected.is_read && (
-                  <span className="text-xs font-bold text-orange">
-                    New
-                  </span>
-                )}
-              </div>
+      {/* =====================================================
+          DELETE CONFIRMATION
+      ===================================================== */}
 
-              <div className="mt-3 text-lg font-extrabold text-slate-900">
-                {selected.title}
-              </div>
-
-              {selected.employee_name && (
-                <div className="mt-1 text-sm font-bold text-orange">
-                  For: {selected.employee_name}
-                </div>
-              )}
-
-              <div className="mt-1 text-xs text-slate-400">
-                {selected.created_at
-                  ? new Date(selected.created_at).toLocaleString()
-                  : '—'}
-              </div>
-            </div>
-
-            <div>
-              <div className="text-xs font-bold uppercase tracking-wide text-slate-500">
-                Details
-              </div>
-
-              <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
-                {selected.message || 'No additional details available.'}
-              </div>
-            </div>
-
-            <div className="flex justify-end">
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => setSelected(null)}
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </Modal>
-      )}
-
-      {/* Delete Notification Modal */}
       {deleteNotification && (
+
         <Modal
           title="Delete Notification?"
           onClose={() => {
+
             if (!deleting) {
-              setDeleteNotification(null);
+              setDeleteNotification(
+                null
+              );
             }
           }}
         >
 
-          <div className="space-y-5">
+          <div
+            className="
+              space-y-5
+            "
+          >
 
-            {/* Warning */}
-            <div className="rounded-xl border border-red-200 bg-red-50 p-4">
+            <div
+              className="
+                rounded-xl
+                border
+                border-red-200
+                bg-red-50
+                p-4
+              "
+            >
 
-              <div className="flex items-start gap-3">
+              <div
+                className="
+                  font-extrabold
+                  text-red-800
+                "
+              >
+                Delete this notification?
+              </div>
 
-                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-red-100 text-xl">
-                  ⚠️
-                </div>
 
-                <div>
-
-                  <h3 className="font-semibold text-red-800">
-                    Are you sure you want to delete this notification?
-                  </h3>
-
-                  <p className="mt-1 text-sm text-red-700">
-                    This action cannot be undone.
-                  </p>
-
-                </div>
-
+              <div
+                className="
+                  mt-1
+                  text-sm
+                  text-red-700
+                "
+              >
+                It will disappear only
+                from your notification inbox.
+                Other users will not be affected.
               </div>
 
             </div>
 
-            {/* Notification Details */}
-            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
 
-              <div className="flex flex-wrap items-center gap-2">
+            <div
+              className="
+                rounded-xl
+                border
+                border-slate-200
+                bg-slate-50
+                p-4
+              "
+            >
 
-                <span
-                  className={`rounded-full px-3 py-1 text-xs font-extrabold ${getTypeStyle(
-                    getNotificationType(
-                      deleteNotification
-                    )
-                  )}`}
-                >
-                  {getNotificationType(
-                    deleteNotification
-                  )}
-                </span>
-
-                {!deleteNotification.is_read && (
-                  <span className="text-xs font-bold text-orange">
-                    New
-                  </span>
-                )}
-
+              <div
+                className="
+                  font-bold
+                  text-slate-900
+                "
+              >
+                {
+                  deleteNotification.title
+                }
               </div>
 
-              <div className="mt-3 text-lg font-bold text-slate-900">
-                {deleteNotification.title}
+
+              <div
+                className="
+                  mt-2
+                  text-sm
+                  leading-6
+                  text-slate-600
+                "
+              >
+                {
+                  deleteNotification.message
+                }
               </div>
-
-              {deleteNotification.employee_name && (
-                <div className="mt-1 text-xs font-bold text-orange">
-                  {deleteNotification.employee_name}
-                </div>
-              )}
-
-              <div className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-slate-600">
-                {deleteNotification.message}
-              </div>
-
-              {deleteNotification.created_at && (
-                <div className="mt-3 text-xs text-slate-400">
-                  {formatDate(
-                    deleteNotification.created_at
-                  )}
-                </div>
-              )}
 
             </div>
 
-            {/* Important Notice */}
-            <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
-              Deleting this notification will permanently
-              remove it from the notification list.
-            </div>
 
-            {/* Buttons */}
-            <div className="flex justify-end gap-3">
+            <div
+              className="
+                flex
+                justify-end
+                gap-3
+              "
+            >
 
               <button
                 type="button"
                 className="btn"
-                disabled={deleting}
+                disabled={
+                  deleting
+                }
                 onClick={() =>
-                  setDeleteNotification(null)
+                  setDeleteNotification(
+                    null
+                  )
                 }
               >
                 Cancel
               </button>
 
+
               <button
                 type="button"
-                className="btn bg-red-600 text-white hover:bg-red-700"
-                disabled={deleting}
+                className="
+                  btn
+                  bg-red-600
+                  text-white
+                  hover:bg-red-700
+                "
+                disabled={
+                  deleting
+                }
                 onClick={() =>
                   void remove()
                 }
               >
-                {deleting
-                  ? 'Deleting...'
-                  : 'Delete Notification'}
+                {
+                  deleting
+                    ? 'Deleting...'
+                    : 'Delete Notification'
+                }
               </button>
 
             </div>
@@ -654,39 +2019,120 @@ export default function Notifications() {
         </Modal>
       )}
 
-{/* Clear All Confirmation Modal */}
+
+      {/* =====================================================
+          CLEAR ALL CONFIRMATION
+      ===================================================== */}
+
       {confirmClear && (
+
         <Modal
-          title="Clear All Notifications"
-          onClose={() => setConfirmClear(false)}
+          title="Clear All Notifications?"
+          onClose={() => {
+
+            if (!clearing) {
+              setConfirmClear(
+                false
+              );
+            }
+          }}
         >
-          <div className="space-y-5">
-            <div className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800">
-              <div className="font-extrabold">Are you sure?</div>
-              <div className="mt-1">
-                This will permanently remove all notifications currently
-                visible to you.
+
+          <div
+            className="
+              space-y-5
+            "
+          >
+
+            <div
+              className="
+                rounded-xl
+                border
+                border-red-200
+                bg-red-50
+                p-4
+              "
+            >
+
+              <div
+                className="
+                  font-extrabold
+                  text-red-800
+                "
+              >
+                Clear your entire notification inbox?
               </div>
+
+
+              <div
+                className="
+                  mt-2
+                  text-sm
+                  leading-6
+                  text-red-700
+                "
+              >
+                This will clear notifications
+                only from your account.
+                Notifications belonging to
+                Employees, Team Leads,
+                Admins or Super Admins
+                will not be affected.
+              </div>
+
             </div>
 
-            <div className="flex justify-end gap-3">
+
+            <div
+              className="
+                flex
+                justify-end
+                gap-3
+              "
+            >
+
               <button
                 type="button"
                 className="btn"
-                onClick={() => setConfirmClear(false)}
+                disabled={
+                  clearing
+                }
+                onClick={() =>
+                  setConfirmClear(
+                    false
+                  )
+                }
               >
                 Cancel
               </button>
 
+
               <button
                 type="button"
-                className="btn bg-red-600 text-white hover:bg-red-700"
-                onClick={() => void confirmClearAll()}
+                className="
+                  btn
+                  bg-red-600
+                  text-white
+                  hover:bg-red-700
+                "
+                disabled={
+                  clearing
+                }
+                onClick={() =>
+                  void clearAll()
+                }
               >
-                Clear All
+                {
+                  clearing
+                    ? 'Clearing...'
+                    : 'Clear All'
+                }
               </button>
+
             </div>
+
           </div>
+
         </Modal>
       )}
 

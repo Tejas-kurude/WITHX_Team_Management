@@ -30,7 +30,7 @@ r.get('/leave', authenticate, c.listLeaves); r.post('/leave', authenticate, c.ap
 
 r.get('/performance', authenticate, c.performanceList); r.post('/performance/calculate', authenticate, c.performance);
 
-r.get('/notifications', authenticate, c.notifications); r.put('/notifications/:id/read', authenticate, c.markNotification); r.delete('/notifications', authenticate, c.clearAllNotifications); r.put('/notifications/:id', authenticate, allowRoles('SUPER_ADMIN'), c.updateNotification); r.delete('/notifications/:id', authenticate, allowRoles('SUPER_ADMIN'), c.deleteNotification);
+r.get('/notifications', authenticate, c.notifications); r.put('/notifications/:id/read', authenticate, c.markNotification); r.delete('/notifications', authenticate, c.clearAllNotifications); r.put('/notifications/:id', authenticate, allowRoles('SUPER_ADMIN'), c.updateNotification); r.delete('/notifications/:id', authenticate, allowRoles('SUPER_ADMIN'), c.deleteNotification) , r.get('/notifications/unread-count', authenticate, c.unreadNotificationCount);
 
 r.get('/activity', authenticate, allowRoles('SUPER_ADMIN', 'ADMIN'), c.activity);
 r.get('/analytics', authenticate, allowRoles('SUPER_ADMIN', 'ADMIN', 'TEAM_LEAD'), c.analytics);

@@ -11,6 +11,9 @@ export default function Performance() {
   const [target, setTarget] = useState('');
   const [msg, setMsg] = useState('');
   const [calculating, setCalculating] = useState(false);
+  const now = new Date();
+  const [selectedMonth, setSelectedMonth] = useState(now.getMonth() + 1);
+  const [selectedYear, setSelectedYear] = useState(now.getFullYear());
 
   const safeNumber = (value: any, fallback = 0) => {
     const n = Number(value);
@@ -24,7 +27,11 @@ export default function Performance() {
   const load = async () => {
     try {
       const r = await api.get('/performance', {
-        params: { _ts: Date.now() },
+        params: {
+          month: selectedMonth,
+          year: selectedYear,
+          _ts: Date.now(),
+        },
       });
       setRows(Array.isArray(r.data) ? r.data : []);
     } catch (e) {
@@ -47,7 +54,7 @@ export default function Performance() {
           setEmps([]);
         });
     }
-  }, []);
+  }, [selectedMonth, selectedYear]);
 
   async function calc(employeeId?: string) {
     try {
@@ -57,6 +64,8 @@ export default function Performance() {
       const response = await api.post('/performance/calculate', null, {
         params: {
           employeeId: employeeId || target || undefined,
+          month: selectedMonth,
+          year: selectedYear,
         },
       });
 
@@ -101,7 +110,12 @@ export default function Performance() {
       setCalculating(true);
       setMsg('');
 
-      const response = await api.post('/performance/calculate');
+      const response = await api.post('/performance/calculate', null, {
+        params: {
+          month: selectedMonth,
+          year: selectedYear,
+        },
+      });
 
       // The calculate endpoint returns the newly calculated rows. Apply
       // those rows directly so the UI cannot fall back to an older record.
@@ -159,8 +173,67 @@ export default function Performance() {
         }
       />
 
+      {user?.role === 'EMPLOYEE' && (
+        <div className="card mb-5 flex flex-wrap items-center gap-3 p-4">
+          <label className="text-sm font-bold text-slate-700">Month</label>
+          <select
+            className="input max-w-[180px]"
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(Number(e.target.value))}
+          >
+            {[
+              'January','February','March','April','May','June',
+              'July','August','September','October','November','December'
+            ].map((name, index) => (
+              <option key={name} value={index + 1}>{name}</option>
+            ))}
+          </select>
+
+          <label className="ml-2 text-sm font-bold text-slate-700">Year</label>
+          <select
+            className="input max-w-[120px]"
+            value={selectedYear}
+            onChange={(e) => setSelectedYear(Number(e.target.value))}
+          >
+            {Array.from({ length: 6 }, (_, index) => now.getFullYear() - index).map((year) => (
+              <option key={year} value={year}>{year}</option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {user?.role !== 'EMPLOYEE' && (
         <div className="card mb-5 flex flex-wrap items-center gap-3 p-4">
+          <select
+            className="input max-w-[180px]"
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(Number(e.target.value))}
+          >
+            {[
+              'January','February','March','April','May','June',
+              'July','August','September','October','November','December'
+            ].map((name, index) => (
+              <option key={name} value={index + 1}>
+                {name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            className="input max-w-[120px]"
+            value={selectedYear}
+            onChange={(e) => setSelectedYear(Number(e.target.value))}
+          >
+            {Array.from(
+              { length: 6 },
+              (_, index) => now.getFullYear() - index
+            ).map((year) => (
+              <option key={year} value={year}>
+                {year}
+              </option>
+            ))}
+          </select>
+
           <select
             className="input max-w-sm"
             value={target}

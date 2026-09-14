@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from 'react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
@@ -14,6 +14,11 @@ export default function Reports() {
 
   const [err, setErr] = useState('');
   const [pageErr, setPageErr] = useState('');
+  const [selectedReport, setSelectedReport] = useState<any | null>(null);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState('ALL');
+  const [departmentFilter, setDepartmentFilter] = useState('ALL');
+  const [dateFilter, setDateFilter] = useState('');
 
   /* =========================================
      REVIEW MODAL STATES
@@ -227,6 +232,57 @@ export default function Reports() {
     )[status] || status;
   }
 
+  function statusShort(status: string) {
+    return ({
+      PENDING: 'Pending',
+      APPROVED_BY_TEAM_LEAD: 'TL Approved',
+      APPROVED_BY_ADMIN: 'Admin Approved',
+      REVIEWED: 'Approved',
+      NEEDS_CHANGES: 'Needs Changes',
+      REJECTED: 'Rejected',
+    } as any)[status] || status;
+  }
+
+  function statusClass(status: string) {
+    if (status === 'REVIEWED') return 'border-green-200 bg-green-50 text-green-700';
+    if (status === 'APPROVED_BY_TEAM_LEAD' || status === 'APPROVED_BY_ADMIN') return 'border-blue-200 bg-blue-50 text-blue-700';
+    if (status === 'NEEDS_CHANGES') return 'border-amber-200 bg-amber-50 text-amber-700';
+    if (status === 'REJECTED') return 'border-red-200 bg-red-50 text-red-700';
+    return 'border-slate-200 bg-slate-100 text-slate-700';
+  }
+
+  function formatReportDate(value: string) {
+    if (!value) return '—';
+    return new Date(value).toLocaleDateString([], { day: '2-digit', month: 'short', year: 'numeric' });
+  }
+
+  function shortText(value: string, limit = 75) {
+    if (!value) return '—';
+    return value.length > limit ? `${value.slice(0, limit)}...` : value;
+  }
+
+  const departments = useMemo(
+    () => Array.from(new Set(rows.map(r => r.department_name).filter(Boolean))).sort(),
+    [rows]
+  );
+
+  const filteredRows = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return rows.filter(r => {
+      const matchesSearch = !q ||
+        String(r.employee_name || '').toLowerCase().includes(q) ||
+        String(r.employee_code || '').toLowerCase().includes(q) ||
+        String(r.completed_work || '').toLowerCase().includes(q) ||
+        String(r.tasks_worked || '').toLowerCase().includes(q) ||
+        String(r.tomorrow_plan || '').toLowerCase().includes(q) ||
+        String(r.blockers || '').toLowerCase().includes(q);
+      const matchesStatus = statusFilter === 'ALL' || r.review_status === statusFilter;
+      const matchesDepartment = departmentFilter === 'ALL' || r.department_name === departmentFilter;
+      const matchesDate = !dateFilter || (r.report_date && new Date(r.report_date).toLocaleDateString('en-CA') === dateFilter);
+      return matchesSearch && matchesStatus && matchesDepartment && matchesDate;
+    });
+  }, [rows, search, statusFilter, departmentFilter, dateFilter]);
+
   return (
     <>
       {/* =========================================
@@ -261,204 +317,267 @@ export default function Reports() {
       )}
 
       {/* =========================================
-          REPORT LIST
+          REPORT FILTERS
       ========================================= */}
 
-      {rows.length ? (
-        <div className="space-y-4">
+      <div className="mb-4 rounded-2xl border border-slate-200 bg-white p-4">
+        <div className="grid gap-3 lg:grid-cols-12">
+          <div className={user?.role === 'EMPLOYEE' ? 'lg:col-span-5' : 'lg:col-span-4'}>
+            <input
+              className="input w-full"
+              value={search}
+              onChange={e => setSearch(e.target.value)}
+              placeholder={user?.role === 'EMPLOYEE' ? 'Search report content' : 'Search employee, ID or report content'}
+            />
+          </div>
 
-          {rows.map(r => (
-            <div
-              className="card p-5"
-              key={r.id}
-            >
+          <div className="lg:col-span-3">
+            <select className="input w-full" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+              <option value="ALL">All review statuses</option>
+              <option value="PENDING">Pending</option>
+              <option value="APPROVED_BY_TEAM_LEAD">Team Lead approved</option>
+              <option value="APPROVED_BY_ADMIN">Admin approved</option>
+              <option value="REVIEWED">Fully approved</option>
+              <option value="NEEDS_CHANGES">Needs changes</option>
+              <option value="REJECTED">Rejected</option>
+            </select>
+          </div>
 
-              {/* REPORT HEADER */}
-
-              <div className="flex flex-wrap justify-between gap-3">
-
-                <div>
-
-                  <h3 className="font-extrabold">
-                    {user?.role === 'EMPLOYEE'
-                      ? 'My Report'
-                      : r.employee_name}
-                  </h3>
-
-                  {user?.role !== 'EMPLOYEE' && (
-                    <div className="text-xs font-semibold text-orange">
-                      {r.employee_code}
-                      {' • '}
-                      {r.user_type}
-                      {' • '}
-                      {r.department_name ||
-                        'No department'}
-                    </div>
-                  )}
-
-                  <div className="text-sm muted">
-                    {new Date(
-                      r.report_date
-                    ).toLocaleDateString()}
-                  </div>
-
-                </div>
-
-                <div className="flex items-center gap-2">
-
-                  <span className="badge">
-                    {statusText(
-                      r.review_status
-                    )}
-                  </span>
-
-                  {isSuper && (
-                    <>
-
-                      <button
-                        className="btn !px-3 !py-1.5"
-                        onClick={() => {
-                          setEditing(r);
-                          setErr('');
-                          setShow(true);
-                        }}
-                      >
-                        Edit
-                      </button>
-
-                      <button
-                        className="btn !px-3 !py-1.5 text-red-600"
-                        onClick={() =>
-                          setDeleteReport(r)
-                        }
-                      >
-                        Delete
-                      </button>
-
-                    </>
-                  )}
-
-                </div>
-
-              </div>
-
-              {/* REPORT DETAILS */}
-
-              <div className="mt-4 grid gap-4 lg:grid-cols-2">
-
-                <div>
-                  <div className="label">
-                    Completed
-                  </div>
-
-                  <p className="mt-1 whitespace-pre-wrap text-sm">
-                    {r.completed_work}
-                  </p>
-                </div>
-
-                <div>
-                  <div className="label">
-                    Tomorrow
-                  </div>
-
-                  <p className="mt-1 whitespace-pre-wrap text-sm">
-                    {r.tomorrow_plan || '—'}
-                  </p>
-                </div>
-
-                <div>
-                  <div className="label">
-                    Blockers
-                  </div>
-
-                  <p className="mt-1 whitespace-pre-wrap text-sm">
-                    {r.blockers || 'None'}
-                  </p>
-                </div>
-
-                <div>
-                  <div className="label">
-                    Hours Worked
-                  </div>
-
-                  <p className="mt-1 text-sm">
-                    {r.hours_worked || '—'}
-                  </p>
-                </div>
-
-              </div>
-
-              {/* APPROVAL FLOW */}
-
-              <div className="mt-4 rounded-lg bg-slate-50 p-3 text-xs">
-                <b>Approval flow:</b>{' '}
-                Team Lead → Admin → Super Admin.
-                A higher-level reviewer may approve
-                directly and skip pending lower
-                levels.
-              </div>
-
-              {/* REVIEW COMMENT */}
-
-              {r.review_comment && (
-                <div className="mt-3 rounded-lg bg-amber-50 p-3 text-sm">
-                  <b>
-                    Latest review comment:
-                  </b>{' '}
-                  {r.review_comment}
-                </div>
-              )}
-
-              {/* REVIEW BUTTONS */}
-
-              {canReview(r) && (
-                <div className="mt-4 flex flex-wrap gap-2">
-
-                  <button
-                    className="btn btn-accent"
-                    onClick={() =>
-                      openReview(
-                        r,
-                        'APPROVE'
-                      )
-                    }
-                  >
-                    Approve
-                  </button>
-
-                  <button
-                    className="btn"
-                    onClick={() =>
-                      openReview(
-                        r,
-                        'NEEDS_CHANGES'
-                      )
-                    }
-                  >
-                    Needs Changes
-                  </button>
-
-                  <button
-                    className="btn text-red-600"
-                    onClick={() =>
-                      openReview(
-                        r,
-                        'REJECT'
-                      )
-                    }
-                  >
-                    Reject
-                  </button>
-
-                </div>
-              )}
-
+          {user?.role !== 'EMPLOYEE' && (
+            <div className="lg:col-span-2">
+              <select className="input w-full" value={departmentFilter} onChange={e => setDepartmentFilter(e.target.value)}>
+                <option value="ALL">All departments</option>
+                {departments.map(department => (
+                  <option key={String(department)} value={String(department)}>{String(department)}</option>
+                ))}
+              </select>
             </div>
-          ))}
+          )}
 
+          <div className="lg:col-span-2">
+            <input className="input w-full" type="date" value={dateFilter} onChange={e => setDateFilter(e.target.value)} />
+          </div>
+
+          <div className="lg:col-span-1">
+            <button
+              type="button"
+              className="btn w-full"
+              onClick={() => {
+                setSearch('');
+                setStatusFilter('ALL');
+                setDepartmentFilter('ALL');
+                setDateFilter('');
+              }}
+            >
+              Reset
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-4 flex items-center justify-between rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm">
+        <span className="font-semibold text-slate-600">Daily Reports</span>
+        <span className="font-semibold text-slate-500">Showing: {filteredRows.length} of {rows.length}</span>
+      </div>
+
+      {/* =========================================
+          REPORT TABLE
+      ========================================= */}
+
+      {filteredRows.length ? (
+        <div className="card overflow-hidden p-0">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1100px] text-left">
+              <thead className="border-b border-slate-200 bg-slate-50">
+                <tr className="text-xs font-extrabold uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-4">Date</th>
+                  {user?.role !== 'EMPLOYEE' && <th className="px-4 py-4">Employee</th>}
+                  {user?.role !== 'EMPLOYEE' && <th className="px-4 py-4">Department</th>}
+                  <th className="px-4 py-4">Completed Work</th>
+                  <th className="px-4 py-4 text-center">Hours</th>
+                  <th className="px-4 py-4 text-center">Status</th>
+                  <th className="px-4 py-4 text-right">Action</th>
+                </tr>
+              </thead>
+
+              <tbody className="divide-y divide-slate-200">
+                {filteredRows.map(r => (
+                  <tr key={r.id} className="bg-white transition hover:bg-slate-50">
+                    <td className="whitespace-nowrap px-4 py-4 align-middle text-sm font-semibold text-slate-700">
+                      {formatReportDate(r.report_date)}
+                    </td>
+
+                    {user?.role !== 'EMPLOYEE' && (
+                      <td className="px-4 py-4 align-middle">
+                        <div className="font-extrabold text-slate-900">{r.employee_name || '—'}</div>
+                        <div className="mt-1 text-xs font-semibold text-slate-500">
+                          {r.employee_code || '—'}{r.user_type ? ` • ${r.user_type}` : ''}
+                        </div>
+                      </td>
+                    )}
+
+                    {user?.role !== 'EMPLOYEE' && (
+                      <td className="px-4 py-4 align-middle text-sm font-semibold text-slate-700">
+                        {r.department_name || '—'}
+                      </td>
+                    )}
+
+                    <td className="max-w-[430px] px-4 py-4 align-middle">
+                      <div className="text-sm font-semibold leading-5 text-slate-800">{shortText(r.completed_work)}</div>
+                      {r.tasks_worked && <div className="mt-1 text-xs text-slate-500">Tasks: {shortText(r.tasks_worked, 55)}</div>}
+                    </td>
+
+                    <td className="whitespace-nowrap px-4 py-4 align-middle text-center text-sm font-bold text-slate-700">
+                      {r.hours_worked ?? '—'}
+                    </td>
+
+                    <td className="px-4 py-4 align-middle text-center">
+                      <span className={`inline-flex min-w-[92px] items-center justify-center rounded-full border px-2.5 py-1 text-[11px] font-extrabold ${statusClass(r.review_status)}`}>
+                        {statusShort(r.review_status)}
+                      </span>
+                    </td>
+
+                    <td className="px-4 py-4 align-middle">
+                      <div className="flex justify-end">
+                        <button type="button" className="btn !px-3 !py-2 text-xs font-bold" onClick={() => setSelectedReport(r)}>
+                          View Details
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       ) : (
         !pageErr && <Empty />
+      )}
+
+      {/* =========================================
+          REPORT DETAILS MODAL
+      ========================================= */}
+
+      {selectedReport && (
+        <Modal title="Daily Report Details" onClose={() => setSelectedReport(null)}>
+          <div className="space-y-5">
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-xl font-extrabold text-slate-900">
+                    {user?.role === 'EMPLOYEE' ? 'My Daily Report' : selectedReport.employee_name || 'Daily Report'}
+                  </div>
+                  {user?.role !== 'EMPLOYEE' && (
+                    <div className="mt-1 text-sm font-bold text-orange">
+                      {selectedReport.employee_code || '—'}
+                      {selectedReport.user_type ? ` • ${selectedReport.user_type}` : ''}
+                      {' • '}{selectedReport.department_name || 'No department'}
+                    </div>
+                  )}
+                  <div className="mt-2 text-sm font-semibold text-slate-500">
+                    Report Date: {formatReportDate(selectedReport.report_date)}
+                  </div>
+                </div>
+
+                <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-extrabold ${statusClass(selectedReport.review_status)}`}>
+                  {statusShort(selectedReport.review_status)}
+                </span>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <div className="label">Hours Worked</div>
+                <div className="mt-1 font-bold text-slate-900">{selectedReport.hours_worked ?? '—'}</div>
+              </div>
+              <div className="rounded-xl border border-slate-200 bg-white p-4">
+                <div className="label">Review Status</div>
+                <div className="mt-1 text-sm font-semibold text-slate-700">{statusText(selectedReport.review_status)}</div>
+              </div>
+            </div>
+
+            <div>
+              <div className="label">Completed Work</div>
+              <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                {selectedReport.completed_work || '—'}
+              </div>
+            </div>
+
+            {selectedReport.tasks_worked && (
+              <div>
+                <div className="label">Tasks Worked On</div>
+                <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                  {selectedReport.tasks_worked}
+                </div>
+              </div>
+            )}
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <div>
+                <div className="label">Problems / Blockers</div>
+                <div className="mt-2 min-h-[88px] whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                  {selectedReport.blockers || 'None'}
+                </div>
+              </div>
+              <div>
+                <div className="label">Plan for Tomorrow</div>
+                <div className="mt-2 min-h-[88px] whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                  {selectedReport.tomorrow_plan || '—'}
+                </div>
+              </div>
+            </div>
+
+            {selectedReport.comments && (
+              <div>
+                <div className="label">Additional Comments</div>
+                <div className="mt-2 whitespace-pre-wrap break-words rounded-xl border border-slate-200 bg-white p-4 text-sm leading-6 text-slate-700">
+                  {selectedReport.comments}
+                </div>
+              </div>
+            )}
+
+            <div className="rounded-xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700">
+              <b>Approval flow:</b> Team Lead → Admin → Super Admin. A higher-level reviewer may approve directly and skip pending lower levels.
+            </div>
+
+            {selectedReport.review_comment && (
+              <div className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-800">
+                <b>Latest review comment:</b> {selectedReport.review_comment}
+              </div>
+            )}
+
+            <div className="flex flex-wrap justify-end gap-2 border-t border-slate-200 pt-4">
+              {canReview(selectedReport) && (
+                <>
+                  <button className="btn btn-accent" onClick={() => { setSelectedReport(null); openReview(selectedReport, 'APPROVE'); }}>
+                    Approve
+                  </button>
+                  <button className="btn" onClick={() => { setSelectedReport(null); openReview(selectedReport, 'NEEDS_CHANGES'); }}>
+                    Needs Changes
+                  </button>
+                  <button className="btn text-red-600" onClick={() => { setSelectedReport(null); openReview(selectedReport, 'REJECT'); }}>
+                    Reject
+                  </button>
+                </>
+              )}
+
+              {isSuper && (
+                <>
+                  <button className="btn" onClick={() => { setSelectedReport(null); setEditing(selectedReport); setErr(''); setShow(true); }}>
+                    Edit
+                  </button>
+                  <button className="btn text-red-600" onClick={() => { setSelectedReport(null); setDeleteReport(selectedReport); }}>
+                    Delete
+                  </button>
+                </>
+              )}
+
+              <button type="button" className="btn btn-primary" onClick={() => setSelectedReport(null)}>
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
 
       {/* =========================================

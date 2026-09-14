@@ -3260,31 +3260,46 @@ function countNeutralLeaveDaysAfterDueDate(
 
 export async function performance(req: Request, res: Response) {
   const requestedEmployeeId = Number(req.query.employeeId || 0);
+  const requestedMonth = Number(req.query.month || 0);
+  const requestedYear = Number(req.query.year || 0);
+
   let targets: number[] = [];
 
   if (req.user!.role === 'EMPLOYEE') {
     targets = [req.user!.employeeId!];
   } else if (requestedEmployeeId) {
-    if (req.user!.role === 'TEAM_LEAD' && !(await requireTeamAuthority(req, requestedEmployeeId))) {
-      return res.status(403).json({ message: 'This employee is outside your team.' });
+    if (
+      req.user!.role === 'TEAM_LEAD' &&
+      !(await requireTeamAuthority(req, requestedEmployeeId))
+    ) {
+      return res
+        .status(403)
+        .json({ message: 'This employee is outside your team.' });
     }
     targets = [requestedEmployeeId];
   } else if (req.user!.role === 'TEAM_LEAD') {
     const team = await query<any>(
-      'SELECT id FROM employees WHERE team_lead_id=$1 AND status <> \'INACTIVE\'',
+      `SELECT id
+       FROM employees
+       WHERE team_lead_id=$1
+         AND status <> 'INACTIVE'`,
       [req.user!.employeeId]
     );
     targets = team.rows.map((row: any) => Number(row.id));
   } else {
     const employees = await query<any>(
-      'SELECT id FROM employees WHERE status <> \'INACTIVE\''
+      `SELECT id
+       FROM employees
+       WHERE status <> 'INACTIVE'`
     );
     targets = employees.rows.map((row: any) => Number(row.id));
   }
 
   targets = targets.filter(Number.isFinite);
   if (!targets.length) {
-    return res.status(400).json({ message: 'No employees available for performance calculation.' });
+    return res.status(400).json({
+      message: 'No employees available for performance calculation.',
+    });
   }
 
   const safeNumber = (value: any, fallback = 0) => {
@@ -3300,15 +3315,55 @@ export async function performance(req: Request, res: Response) {
     return values.reduce((sum, value) => sum + value, 0) / values.length;
   };
 
-  const dateResult = await query<any>('SELECT current_date::text AS current_date');
-  const currentDate = dateOnlyValue(dateResult.rows[0]?.current_date || new Date());
-  const periodStartDefault = shiftDate(currentDate, -29);
+  const dateResult = await query<any>(
+    'SELECT current_date::text AS current_date'
+  );
+
+  // dateOnlyValue() intentionally returns a YYYY-MM-DD string because the
+  // performance calculation compares and iterates dates as strings.
+  // Use a separate Date object only for month/year extraction.
+  const systemCurrentDate = dateOnlyValue(
+    dateResult.rows[0]?.current_date || new Date()
+  );
+
+  const systemCurrentDateObj = new Date(
+    `${systemCurrentDate}T00:00:00Z`
+  );
+
+  const calculationMonth =
+    requestedMonth >= 1 && requestedMonth <= 12
+      ? requestedMonth
+      : systemCurrentDateObj.getUTCMonth() + 1;
+
+  const calculationYear =
+    requestedYear >= 2000 && requestedYear <= 2100
+      ? requestedYear
+      : systemCurrentDateObj.getUTCFullYear();
+
+  const monthStart = new Date(
+    Date.UTC(calculationYear, calculationMonth - 1, 1)
+  );
+  const monthEnd = new Date(
+    Date.UTC(calculationYear, calculationMonth, 0)
+  );
+
+  // For the current month, calculate only up to today for attendance/tasks.
+  // The stored period still represents the complete calendar month.
+  const isCurrentMonth =
+    calculationYear === systemCurrentDateObj.getUTCFullYear() &&
+    calculationMonth === systemCurrentDateObj.getUTCMonth() + 1;
+
+  const calculationEnd = isCurrentMonth
+    ? systemCurrentDate
+    : monthEnd;
 
   const calculated: any[] = [];
 
   for (const target of targets) {
     const employeeMeta = await query<any>(
-      `SELECT joining_date::text AS joining_date FROM employees WHERE id=$1`,
+      `SELECT joining_date::text AS joining_date
+       FROM employees
+       WHERE id=$1`,
       [target]
     );
 
@@ -3321,20 +3376,11 @@ export async function performance(req: Request, res: Response) {
     const saturdayHours = normalDayHours * 2;
     const dailyDeduction = 100 / 26;
 
-    /*
-     * ---------------------------------------------------------
-     * 1. USE A ROLLING 30-DAY PERFORMANCE WINDOW
-     * ---------------------------------------------------------
-     *
-     * The reference model uses 26 working days for 100% attendance.
-     * A 30-day window therefore considers Monday-Saturday as working
-     * days and excludes Sundays. Approved PAID/SICK leave days are
-     * neutral and never create an attendance deduction.
-     */
-    // Never penalize an employee for dates before they joined.
-    const periodStart = joiningDate && joiningDate > periodStartDefault
-      ? joiningDate
-      : periodStartDefault;
+    // Never calculate a score for dates before the employee joined.
+    const periodStart =
+      joiningDate && joiningDate > monthStart
+        ? joiningDate
+        : monthStart;
 
     const [attendanceResult, leaveResult, taskResult] = await Promise.all([
       query<any>(
@@ -3346,34 +3392,44 @@ export async function performance(req: Request, res: Response) {
            CASE
              WHEN check_in IS NULL THEN 0
              WHEN check_out IS NOT NULL THEN COALESCE(total_hours, 0)
-             ELSE ROUND((EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric, 2)
+             ELSE ROUND(
+               (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
+               2
+             )
            END AS worked_hours
          FROM attendance
          WHERE employee_id=$1
            AND work_date BETWEEN $2::date AND $3::date
          ORDER BY work_date`,
-        [target, periodStart, currentDate]
+        [target, periodStart, calculationEnd]
       ),
       query<any>(
-        `SELECT start_date::text AS start_date,
-                end_date::text AS end_date,
-                leave_type
+        `SELECT
+           start_date::text AS start_date,
+           end_date::text AS end_date,
+           leave_type
          FROM leave_requests
          WHERE employee_id=$1
            AND status='APPROVED'
            AND end_date >= $2::date
+           AND start_date <= $3::date
          ORDER BY start_date`,
-        [target, periodStart]
+        [target, periodStart, monthEnd]
       ),
       query<any>(
-        `SELECT id, start_date::text AS start_date, due_date, status, completed_at
+        `SELECT
+           id,
+           start_date::text AS start_date,
+           due_date,
+           status,
+           completed_at
          FROM tasks
          WHERE assigned_to=$1
            AND created_at::date BETWEEN $2::date AND $3::date
            AND status <> 'CANCELLED'
          ORDER BY created_at ASC, id ASC`,
-        [target, periodStart, currentDate]
-      )
+        [target, periodStart, calculationEnd]
+      ),
     ]);
 
     const attendanceByDate = new Map<string, any>();
@@ -3382,146 +3438,153 @@ export async function performance(req: Request, res: Response) {
     }
 
     const neutralLeaves = leaveResult.rows
-      .filter((row: any) => ['PAID', 'SICK'].includes(String(row.leave_type).toUpperCase()))
+      .filter((row: any) =>
+        ['PAID', 'SICK'].includes(String(row.leave_type).toUpperCase())
+      )
       .map((row: any) => ({
         start_date: row.start_date,
         end_date: row.end_date,
       }));
 
     const unpaidLeaves = leaveResult.rows
-      .filter((row: any) => String(row.leave_type).toUpperCase() === 'UNPAID')
+      .filter(
+        (row: any) =>
+          String(row.leave_type).toUpperCase() === 'UNPAID'
+      )
       .map((row: any) => ({
         start_date: row.start_date,
         end_date: row.end_date,
       }));
 
     /*
-     * ---------------------------------------------------------
-     * 2. ATTENDANCE DEDUCTION
-     * ---------------------------------------------------------
-     *
-     * 26 working days = 100%.
-     * Every complete missed day costs 100/26 = 3.846%.
-     * The hourly deduction is proportional to that day's required
-     * hours. A Saturday is 6 hours when the normal target is 3 hours,
-     * so one Saturday hour is 0.641% exactly as in the reference.
+     * ATTENDANCE METRIC
+     * Attendance shortfall is shown as its own metric.
+     * It does not create the Task or Leave deduction buckets.
      */
-    let attendanceDeduction = 0;
     const attendanceScores: number[] = [];
     const workingDaysSeen: string[] = [];
 
-    for (let cursor = periodStart; cursor <= currentDate; cursor = shiftDate(cursor, 1)) {
+    for (
+      let cursor = periodStart;
+      cursor <= calculationEnd;
+      cursor = shiftDate(cursor, 1)
+    ) {
       if (isSunday(cursor)) continue;
       if (isWithinLeave(cursor, neutralLeaves)) continue;
 
+      // Approved UNPAID leave is handled only by leaveDeduction below.
+      if (isWithinLeave(cursor, unpaidLeaves)) continue;
+
       workingDaysSeen.push(cursor);
-      const requiredHours = isSaturday(cursor) ? saturdayHours : normalDayHours;
+
+      const requiredHours = isSaturday(cursor)
+        ? saturdayHours
+        : normalDayHours;
+
       const record = attendanceByDate.get(cursor);
 
-      // Approved UNPAID leave is a full missed working day and is the only
-      // leave type that creates a leave-related attendance deduction.
-      if (isWithinLeave(cursor, unpaidLeaves)) {
-        attendanceDeduction += dailyDeduction;
-        attendanceScores.push(0);
-        continue;
-      }
-
-      // Do not penalize a completely untouched current day while it is still in progress.
-      if (!record && cursor === currentDate) {
+      // Do not penalize an untouched current day.
+      if (!record && cursor === systemCurrentDate) {
         attendanceScores.push(100);
         continue;
       }
 
-      if (record && String(record.status).toUpperCase() === 'LEAVE') {
-        // PAID/SICK leave is neutral. Any such day should already be covered
-        // by neutralLeaves, but keep this guard so a leave attendance row
-        // can never create an accidental working-hours deduction.
+      if (
+        record &&
+        String(record.status).toUpperCase() === 'LEAVE'
+      ) {
         attendanceScores.push(100);
         continue;
       }
 
-      if (!record || String(record.status).toUpperCase() === 'ABSENT') {
-        attendanceDeduction += dailyDeduction;
+      if (
+        !record ||
+        String(record.status).toUpperCase() === 'ABSENT'
+      ) {
         attendanceScores.push(0);
         continue;
       }
 
-      const workedHours = Math.max(0, safeNumber(record.worked_hours));
-      const missingHours = Math.max(0, requiredHours - workedHours);
+      const workedHours = Math.max(
+        0,
+        safeNumber(record.worked_hours)
+      );
+      const missingHours = Math.max(
+        0,
+        requiredHours - workedHours
+      );
+
       const deduction = Math.min(
         dailyDeduction,
         missingHours * (dailyDeduction / requiredHours)
       );
 
-      attendanceDeduction += deduction;
-      attendanceScores.push(clampPercent(100 - deduction, 100));
+      attendanceScores.push(
+        clampPercent(100 - deduction, 100)
+      );
     }
 
-    attendanceDeduction = Math.min(100, attendanceDeduction);
-
     /*
-     * ---------------------------------------------------------
-     * 3. LEAVE DEDUCTION
-     * ---------------------------------------------------------
+     * LEAVE DEDUCTION
      *
-     * Approved UNPAID leave is deducted immediately, even when the
-     * leave date is in the future. Only working days (Mon-Sat) count.
-     * PAID/SICK/PENDING/REJECTED/CANCELLED leave never contributes.
+     * Only APPROVED UNPAID leave.
+     * The complete leave interval inside the selected month is counted,
+     * even when those dates are in the future. This makes the deduction
+     * immediate after approval.
      */
     let unpaidLeaveDays = 0;
 
-    for (let cursor = periodStart; ; cursor = shiftDate(cursor, 1)) {
-      if (cursor > currentDate) break;
-      if (isSunday(cursor)) continue;
-      if (unpaidLeaves.some((leave: any) => isWithinLeave(cursor, [leave]))) {
-        unpaidLeaveDays += 1;
-      }
-    }
-
-    // Also include approved FUTURE unpaid leave immediately.
     for (const leave of unpaidLeaves) {
       let cursor = dateOnlyValue(leave.start_date);
       const end = dateOnlyValue(leave.end_date);
 
-      while (cursor <= end) {
-        if (cursor > currentDate && !isSunday(cursor)) {
+      const effectiveStart =
+        cursor < periodStart ? periodStart : cursor;
+      const effectiveEnd =
+        end > monthEnd ? monthEnd : end;
+
+      cursor = effectiveStart;
+
+      while (cursor <= effectiveEnd) {
+        if (!isSunday(cursor)) {
           unpaidLeaveDays += 1;
         }
         cursor = shiftDate(cursor, 1);
       }
     }
 
-    const leaveDeduction = Math.min(100, unpaidLeaveDays * dailyDeduction);
+    const leaveDeduction = Math.min(
+      100,
+      unpaidLeaveDays * dailyDeduction
+    );
 
     /*
-     * ---------------------------------------------------------
-     * 4. TASK DEDUCTION
-     * ---------------------------------------------------------
+     * TASK DEDUCTION
      *
-     * Every task starts at 100%.
-     * Each calendar day beyond a task's deadline = 20% loss.
-     *
-     * Exact reference formula:
-     *   Task Deduction = (TOTAL overdue days across ALL tasks × 20%)
-     *                   ÷ TOTAL number of tasks
-     *
-     * Example:
-     *   2 tasks + 3 combined overdue days
-     *   = (3 × 20) ÷ 2
-     *   = 30% task deduction
+     * Task Deduction =
+     *   (total overdue calendar days across all tasks × 20)
+     *   ÷ total number of tasks
      */
     let totalTaskOverdueDays = 0;
     const taskScores: number[] = [];
 
     const calendarDayNumber = (value: Date) =>
-      Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate());
+      Date.UTC(
+        value.getUTCFullYear(),
+        value.getUTCMonth(),
+        value.getUTCDate()
+      );
 
     for (const task of taskResult.rows) {
-      const due = task.due_date ? new Date(task.due_date) : null;
+      const due = task.due_date
+        ? new Date(task.due_date)
+        : null;
+
       const completed =
-        String(task.status).toUpperCase() === 'COMPLETED' && task.completed_at
+        String(task.status).toUpperCase() === 'COMPLETED' &&
+        task.completed_at
           ? new Date(task.completed_at)
-          : new Date();
+          : new Date(`${calculationEnd}T00:00:00Z`);
 
       if (!due || !Number.isFinite(due.getTime())) {
         taskScores.push(100);
@@ -3538,69 +3601,105 @@ export async function performance(req: Request, res: Response) {
 
       let extraDays = Math.max(
         0,
-        Math.floor((completionDay - dueDay) / (24 * 60 * 60 * 1000))
+        Math.floor(
+          (completionDay - dueDay) /
+            (24 * 60 * 60 * 1000)
+        )
       );
 
       // Approved PAID/SICK leave pauses task-delay counting.
       extraDays = Math.max(
         0,
-        extraDays - countNeutralLeaveDaysAfterDueDate(
-          due,
-          completed,
-          neutralLeaves
-        )
+        extraDays -
+          countNeutralLeaveDaysAfterDueDate(
+            due,
+            completed,
+            neutralLeaves
+          )
       );
 
       totalTaskOverdueDays += extraDays;
-      taskScores.push(Math.max(0, 100 - extraDays * 20));
+      taskScores.push(
+        Math.max(0, 100 - extraDays * 20)
+      );
     }
 
     const taskDeduction = taskScores.length
-      ? Math.min(100, (totalTaskOverdueDays * 20) / taskScores.length)
+      ? Math.min(
+          100,
+          (totalTaskOverdueDays * 20) /
+            taskScores.length
+        )
       : 0;
 
-    /*
-     * ---------------------------------------------------------
-     * 5. FINAL PERFORMANCE
-     * ---------------------------------------------------------
-     *
-     * Task and leave deductions are kept separate.
-     *
-     *     Total Deduction = Task Deduction + Leave Deduction
-     *     Final Performance = 100 - Total Deduction
-     *
-     * Attendance remains a separate performance metric and is not
-     * mixed into the Task Deduction or Leave Deduction fields.
-     */
     const deductions = Number(
-      Math.min(100, taskDeduction + leaveDeduction).toFixed(2)
+      Math.min(
+        100,
+        taskDeduction + leaveDeduction
+      ).toFixed(2)
     );
-    const score = Number((100 - deductions).toFixed(2));
 
-    const attendance = clampPercent(calculateAverage(attendanceScores, 100), 100);
-    const taskCompletion = clampPercent(calculateAverage(taskScores, 100), 100);
-    // On-time completion is no longer a separate performance metric.
-    // Task delay is already represented by taskDeduction. Keep the existing
-    // database field populated at 100 for backward compatibility.
-    const onTime = 100;
+    const score = Number(
+      (100 - deductions).toFixed(2)
+    );
 
-    const attendedWorkDays = workingDaysSeen
+    const attendance = clampPercent(
+      calculateAverage(attendanceScores, 100),
+      100
+    );
+
+    const taskCompletion = clampPercent(
+      calculateAverage(taskScores, 100),
+      100
+    );
+
+    const workingAttendanceDays = workingDaysSeen
       .map((dateText) => attendanceByDate.get(dateText))
-      .filter((record) => record && String(record.status).toUpperCase() !== 'ABSENT');
+      .filter(
+        (record) =>
+          record &&
+          String(record.status).toUpperCase() !==
+            'ABSENT'
+      );
 
-    const workingHours = attendedWorkDays.length
+    const workingHours = workingAttendanceDays.length
       ? clampPercent(
-          attendedWorkDays.reduce((sum: number, record: any) => {
-            const dateText = dateOnlyValue(record.work_date);
-            const requiredHours = isSaturday(dateText) ? saturdayHours : normalDayHours;
-            return sum + Math.min(safeNumber(record.worked_hours) / requiredHours, 1);
-          }, 0) / attendedWorkDays.length * 100,
+          (workingAttendanceDays.reduce(
+            (sum: number, record: any) => {
+              const dateText = dateOnlyValue(
+                record.work_date
+              );
+
+              const requiredHours = isSaturday(
+                dateText
+              )
+                ? saturdayHours
+                : normalDayHours;
+
+              return (
+                sum +
+                Math.min(
+                  safeNumber(record.worked_hours) /
+                    requiredHours,
+                  1
+                )
+              );
+            },
+            0
+          ) /
+            workingAttendanceDays.length) *
+            100,
           100
         )
       : 100;
 
-    // Replace today's calculation for this employee so repeated recalculations cannot leave a stale current-day row behind.
-    await query('DELETE FROM performance_scores WHERE employee_id=$1 AND period_end=$2::date', [target, currentDate]);
+    // Keep one record per employee per calendar month.
+    await query(
+      `DELETE FROM performance_scores
+       WHERE employee_id=$1
+         AND period_start=$2::date`,
+      [target, monthStart]
+    );
 
     const r = await query<any>(
       `INSERT INTO performance_scores(
@@ -3620,33 +3719,20 @@ export async function performance(req: Request, res: Response) {
          score
        )
        VALUES(
-         $1,
-         $2,
-         $3,
-         $4,
-         $5,
-         $6,
-         0,
-         0,
-         $7,
-         $8,
-         $9,
-         $10,
-         $11,
-         $12
+         $1,$2,$3,$4,$5,$6,0,0,$7,$8,$9,$10,$11,$12
        )
        RETURNING *`,
       [
         target,
-        periodStart,
-        currentDate,
+        monthStart,
+        monthEnd,
         taskCompletion,
-        onTime,
+        100,
         attendance,
         workingHours,
         minimumWorkHours,
-        taskDeduction,
-        leaveDeduction,
+        Number(taskDeduction.toFixed(2)),
+        Number(leaveDeduction.toFixed(2)),
         deductions,
         score,
       ]
@@ -3654,58 +3740,369 @@ export async function performance(req: Request, res: Response) {
 
     calculated.push({
       ...r.rows[0],
-      attendance_deduction: Number(attendanceDeduction.toFixed(2)),
-      task_deduction: Number(taskDeduction.toFixed(2)),
-      leave_deduction: Number(leaveDeduction.toFixed(2)),
-      deductions: Number(deductions.toFixed(2)),
+      attendance_deduction: 0,
+      task_deduction: Number(
+        taskDeduction.toFixed(2)
+      ),
+      leave_deduction: Number(
+        leaveDeduction.toFixed(2)
+      ),
+      deductions,
       score,
+      month: calculationMonth,
+      year: calculationYear,
     });
   }
 
   res.json(
-    requestedEmployeeId || req.user!.role === 'EMPLOYEE'
+    requestedEmployeeId ||
+      req.user!.role === 'EMPLOYEE'
       ? calculated[0]
-      : { count: calculated.length, scores: calculated }
+      : {
+          count: calculated.length,
+          scores: calculated,
+          month: calculationMonth,
+          year: calculationYear,
+        }
   );
 }
 
 export async function performanceList(req: Request, res: Response) {
+  const month = Number(req.query.month || 0);
+  const year = Number(req.query.year || 0);
+
   const p: any[] = [];
   let w = 'WHERE 1=1';
-  if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND p.employee_id=$${p.length}`; }
-  else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND e.team_lead_id=$${p.length}`; }
-  const r = await query<any>(`
+
+  if (req.user!.role === 'EMPLOYEE') {
+    p.push(req.user!.employeeId);
+    w += ` AND p.employee_id=$${p.length}`;
+  } else if (req.user!.role === 'TEAM_LEAD') {
+    p.push(req.user!.employeeId);
+    w += ` AND e.team_lead_id=$${p.length}`;
+  }
+
+  if (month >= 1 && month <= 12) {
+    p.push(month);
+    w += ` AND EXTRACT(MONTH FROM p.period_start)=$${p.length}`;
+  }
+
+  if (year >= 2000 && year <= 2100) {
+    p.push(year);
+    w += ` AND EXTRACT(YEAR FROM p.period_start)=$${p.length}`;
+  }
+
+  // New monthly snapshots always use the first day of the selected month.
+  // Keep legacy rolling-performance rows in the database, but never show
+  // them in the monthly Performance view.
+  w += ` AND EXTRACT(DAY FROM p.period_start)=1`;
+
+  const r = await query<any>(
+    `
     SELECT DISTINCT ON(p.employee_id)
-      p.*, e.employee_code, e.user_type,
+      p.*,
+      e.employee_code,
+      e.user_type,
       e.first_name||' '||e.last_name employee_name,
       d.name department_name,
-      CASE WHEN p.score='NaN'::numeric THEN 0 ELSE COALESCE(p.score,0) END::numeric AS safe_score,
-      COALESCE(p.required_work_hours,3)::numeric AS required_work_hours
+      CASE
+        WHEN p.score='NaN'::numeric
+          THEN 0
+        ELSE COALESCE(p.score,0)
+      END::numeric AS safe_score,
+      COALESCE(
+        p.required_work_hours,
+        3
+      )::numeric AS required_work_hours
     FROM performance_scores p
     JOIN employees e ON e.id=p.employee_id
     LEFT JOIN departments d ON d.id=e.department_id
     ${w}
-    ORDER BY p.employee_id,p.period_end DESC,p.created_at DESC,p.id DESC
-  `, p);
-  res.json(r.rows.map((row:any)=>({...row,score:Number.isFinite(Number(row.safe_score))?Math.max(0,Math.min(100,Number(row.safe_score))):0})));
+    ORDER BY
+      p.employee_id,
+      p.period_start DESC,
+      p.created_at DESC,
+      p.id DESC
+    `,
+    p
+  );
+
+  res.json(
+    r.rows.map((row: any) => ({
+      ...row,
+      score: Number.isFinite(
+        Number(row.safe_score)
+      )
+        ? Math.max(
+            0,
+            Math.min(
+              100,
+              Number(row.safe_score)
+            )
+          )
+        : 0,
+    }))
+  );
 }
+/* =========================================================
+   NOTIFICATIONS
+========================================================= */
 
 export async function notifications(req: Request, res: Response) {
-  await syncDeadlineNotifications(req.user!.role === 'SUPER_ADMIN' ? null : req.user!.employeeId);
-  if (req.user!.role === 'SUPER_ADMIN') { const r = await query<any>(`SELECT n.*,e.employee_code,e.first_name||' '||e.last_name employee_name FROM notifications n JOIN employees e ON e.id=n.employee_id ORDER BY n.created_at DESC LIMIT 300`); return res.json(r.rows); }
-  const r = await query<any>('SELECT * FROM notifications WHERE employee_id=$1 ORDER BY created_at DESC LIMIT 100', [req.user!.employeeId]); res.json(r.rows);
-}
-export async function clearAllNotifications(req: Request, res: Response) {
-  const r = req.user!.role === 'SUPER_ADMIN'
-    ? await query<any>('DELETE FROM notifications RETURNING id')
-    : await query<any>('DELETE FROM notifications WHERE employee_id=$1 RETURNING id', [req.user!.employeeId]);
-  await audit(req.user?.userId, 'DELETE_ALL', 'NOTIFICATION', null, { count: r.rowCount || 0 });
-  res.json({ ok: true, count: r.rowCount || 0 });
-}
-export async function markNotification(req: Request, res: Response) { await query('UPDATE notifications SET is_read=true,read_at=now() WHERE id=$1 AND employee_id=$2', [Number(req.params.id), req.user!.employeeId]); res.json({ ok: true }); }
-export async function updateNotification(req: Request, res: Response) { const id = Number(req.params.id), { title, message } = req.body; const r = await query<any>('UPDATE notifications SET title=COALESCE($1,title),message=COALESCE($2,message) WHERE id=$3 RETURNING *', [title || null, message || null, id]); if (!r.rows[0]) return res.status(404).json({ message: 'Notification not found' }); await audit(req.user?.userId, 'UPDATE', 'NOTIFICATION', id); res.json(r.rows[0]); }
-export async function deleteNotification(req: Request, res: Response) { const id = Number(req.params.id); const r = await query<any>('DELETE FROM notifications WHERE id=$1 RETURNING id', [id]); if (!r.rows[0]) return res.status(404).json({ message: 'Notification not found' }); await audit(req.user?.userId, 'DELETE', 'NOTIFICATION', id); res.json({ ok: true }); }
+  /*
+   * Create deadline/overdue notifications for the
+   * currently logged-in user before loading their inbox.
+   */
+  await syncDeadlineNotifications(req.user!.employeeId);
 
+  const r = await query<any>(
+    `
+    SELECT
+      n.*,
+      e.employee_code,
+      e.first_name || ' ' || e.last_name AS employee_name
+    FROM notifications n
+    LEFT JOIN employees e
+      ON e.id = n.employee_id
+    WHERE n.employee_id = $1
+      AND COALESCE(n.is_deleted, false) = false
+    ORDER BY n.created_at DESC
+    LIMIT 300
+    `,
+    [req.user!.employeeId]
+  );
+
+  res.json(r.rows);
+}
+
+
+/* =========================================================
+   UNREAD NOTIFICATION COUNT
+========================================================= */
+
+export async function unreadNotificationCount(
+  req: Request,
+  res: Response
+) {
+  /*
+   * Make sure deadline / overdue notifications are also
+   * included even when the Dashboard calls this endpoint
+   * before the Notifications page is opened.
+   */
+  await syncDeadlineNotifications(req.user!.employeeId);
+
+  const r = await query<any>(
+    `
+    SELECT COUNT(*)::int AS count
+    FROM notifications
+    WHERE employee_id = $1
+      AND COALESCE(is_read, false) = false
+      AND COALESCE(is_deleted, false) = false
+    `,
+    [req.user!.employeeId]
+  );
+
+  res.json({
+    unreadCount: Number(r.rows[0]?.count || 0)
+  });
+}
+
+
+/* =========================================================
+   CLEAR ALL NOTIFICATIONS
+   Only hides notifications for the logged-in user.
+========================================================= */
+
+export async function clearAllNotifications(
+  req: Request,
+  res: Response
+) {
+  const r = await query<any>(
+    `
+    UPDATE notifications
+    SET
+      is_deleted = true,
+      deleted_at = now()
+    WHERE employee_id = $1
+      AND COALESCE(is_deleted, false) = false
+    RETURNING id
+    `,
+    [req.user!.employeeId]
+  );
+
+  await audit(
+    req.user?.userId,
+    'DELETE_ALL',
+    'NOTIFICATION',
+    null,
+    {
+      count: r.rowCount || 0
+    }
+  );
+
+  res.json({
+    ok: true,
+    count: r.rowCount || 0
+  });
+}
+
+
+/* =========================================================
+   MARK NOTIFICATION AS READ
+   Only the owner can mark it as read.
+========================================================= */
+
+export async function markNotification(
+  req: Request,
+  res: Response
+) {
+  const id = Number(req.params.id);
+
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({
+      message: 'Invalid notification id'
+    });
+  }
+
+  const r = await query<any>(
+    `
+    UPDATE notifications
+    SET
+      is_read = true,
+      read_at = COALESCE(read_at, now())
+    WHERE id = $1
+      AND employee_id = $2
+      AND COALESCE(is_deleted, false) = false
+    RETURNING id
+    `,
+    [
+      id,
+      req.user!.employeeId
+    ]
+  );
+
+  if (!r.rows[0]) {
+    return res.status(404).json({
+      message: 'Notification not found'
+    });
+  }
+
+  res.json({
+    ok: true
+  });
+}
+
+
+/* =========================================================
+   DELETE ONE NOTIFICATION
+   Soft delete only for the logged-in user.
+========================================================= */
+
+export async function deleteNotification(
+  req: Request,
+  res: Response
+) {
+  const id = Number(req.params.id);
+
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({
+      message: 'Invalid notification id'
+    });
+  }
+
+  const r = await query<any>(
+    `
+    UPDATE notifications
+    SET
+      is_deleted = true,
+      deleted_at = now()
+    WHERE id = $1
+      AND employee_id = $2
+      AND COALESCE(is_deleted, false) = false
+    RETURNING id
+    `,
+    [
+      id,
+      req.user!.employeeId
+    ]
+  );
+
+  if (!r.rows[0]) {
+    return res.status(404).json({
+      message: 'Notification not found'
+    });
+  }
+
+  await audit(
+    req.user?.userId,
+    'DELETE',
+    'NOTIFICATION',
+    id
+  );
+
+  res.json({
+    ok: true
+  });
+}
+
+
+/* =========================================================
+   EDIT NOTIFICATION
+   Super Admin route remains protected in index.ts.
+   Also restrict editing to Super Admin's own notification.
+========================================================= */
+
+export async function updateNotification(
+  req: Request,
+  res: Response
+) {
+  const id = Number(req.params.id);
+
+  if (!Number.isFinite(id)) {
+    return res.status(400).json({
+      message: 'Invalid notification id'
+    });
+  }
+
+  const {
+    title,
+    message
+  } = req.body;
+
+  const r = await query<any>(
+    `
+    UPDATE notifications
+    SET
+      title = COALESCE($1, title),
+      message = COALESCE($2, message)
+    WHERE id = $3
+      AND employee_id = $4
+      AND COALESCE(is_deleted, false) = false
+    RETURNING *
+    `,
+    [
+      title || null,
+      message || null,
+      id,
+      req.user!.employeeId
+    ]
+  );
+
+  if (!r.rows[0]) {
+    return res.status(404).json({
+      message: 'Notification not found'
+    });
+  }
+
+  await audit(
+    req.user?.userId,
+    'UPDATE',
+    'NOTIFICATION',
+    id
+  );
+
+  res.json(r.rows[0]);
+}
 export async function activity(req: Request, res: Response) {
   const { search = '', entity = '', from = '', to = '' } = req.query as any;
   const p:any[]=[]; let w='WHERE 1=1';
