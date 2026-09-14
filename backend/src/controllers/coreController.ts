@@ -3298,15 +3298,111 @@ export async function listLeaves(req: Request, res: Response) {
   `, p); res.json(r.rows);
 }
 export async function decideLeave(req: Request, res: Response) {
-  const id = Number(req.params.id), { status, comment } = req.body; if (!['APPROVED', 'REJECTED'].includes(status)) return res.status(400).json({ message: 'Status must be APPROVED or REJECTED' });
-  const target = await query<any>('SELECT * FROM leave_requests WHERE id=$1', [id]); if (!target.rows[0]) return res.status(404).json({ message: 'Leave request not found' });
-  if (req.user!.role === 'TEAM_LEAD') return res.status(403).json({ message: 'Team Leads do not have leave approval permission.' });
-  if (req.user!.role === 'ADMIN' && target.rows[0].employee_id === req.user!.employeeId) return res.status(403).json({ message: 'Admin cannot approve or reject their own leave. Super Admin approval is required.' });
-  const r = await query<any>('UPDATE leave_requests SET status=$1,review_comment=$2,reviewed_by=$3,reviewed_at=now() WHERE id=$4 RETURNING *', [status, textOrNull(comment), req.user!.employeeId, id]);
-  if (status === 'APPROVED') await query(`INSERT INTO attendance(employee_id,work_date,status,attendance_mode,location_text) SELECT $1,d::date,'LEAVE','OFFLINE','Approved leave' FROM generate_series($2::date,$3::date,'1 day') d ON CONFLICT(employee_id,work_date) DO UPDATE SET status='LEAVE'`, [r.rows[0].employee_id, r.rows[0].start_date, r.rows[0].end_date]);
-  await query(`INSERT INTO notifications(employee_id,type,title,message,entity_type,entity_id) VALUES($1,$2,$3,$4,'LEAVE',$5)`, [r.rows[0].employee_id, 'LEAVE_' + status, 'Leave request ' + status.toLowerCase(), comment || `Your leave request was ${status.toLowerCase()}.`, String(id)]);
-  await audit(req.user?.userId, status, 'LEAVE', id); res.json(r.rows[0]);
+  const id = Number(req.params.id);
+  const { status, comment } = req.body;
+
+  if (!['APPROVED', 'REJECTED'].includes(status)) {
+    return res.status(400).json({
+      message: 'Status must be APPROVED or REJECTED'
+    });
+  }
+
+  // Leave becomes effective only after Super Admin approval/rejection.
+  if (req.user!.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({
+      message: 'Only Super Admin can approve or reject leave requests.'
+    });
+  }
+
+  const target = await query<any>(
+    'SELECT * FROM leave_requests WHERE id=$1',
+    [id]
+  );
+
+  if (!target.rows[0]) {
+    return res.status(404).json({
+      message: 'Leave request not found'
+    });
+  }
+
+  const r = await query<any>(
+    `UPDATE leave_requests
+     SET status=$1,
+         review_comment=$2,
+         reviewed_by=$3,
+         reviewed_at=now()
+     WHERE id=$4
+     RETURNING *`,
+    [
+      status,
+      textOrNull(comment),
+      req.user!.employeeId,
+      id
+    ]
+  );
+
+  if (status === 'APPROVED') {
+    // Keep approved leave visible in Attendance, but never create Sunday rows.
+    // Performance later distinguishes PAID (no deduction) from SICK/UNPAID (deduction).
+    await query(
+      `INSERT INTO attendance(
+         employee_id,
+         work_date,
+         status,
+         attendance_mode,
+         location_text
+       )
+       SELECT
+         $1,
+         d::date,
+         'LEAVE',
+         'OFFLINE',
+         'Approved ' || $4 || ' leave'
+       FROM generate_series($2::date,$3::date,'1 day') d
+       WHERE EXTRACT(DOW FROM d::date) <> 0
+       ON CONFLICT(employee_id,work_date)
+       DO UPDATE SET
+         status='LEAVE',
+         attendance_mode='OFFLINE',
+         location_text='Approved ' || $4 || ' leave'`,
+      [
+        r.rows[0].employee_id,
+        r.rows[0].start_date,
+        r.rows[0].end_date,
+        String(r.rows[0].leave_type || 'leave').toUpperCase()
+      ]
+    );
+  }
+
+  await query(
+    `INSERT INTO notifications(
+       employee_id,
+       type,
+       title,
+       message,
+       entity_type,
+       entity_id
+     )
+     VALUES($1,$2,$3,$4,'LEAVE',$5)`,
+    [
+      r.rows[0].employee_id,
+      'LEAVE_' + status,
+      'Leave request ' + status.toLowerCase(),
+      comment || `Your leave request was ${status.toLowerCase()}.`,
+      String(id)
+    ]
+  );
+
+  await audit(
+    req.user?.userId,
+    status,
+    'LEAVE',
+    id
+  );
+
+  res.json(r.rows[0]);
 }
+
 export async function updateLeaveRequest(req: Request, res: Response) {
   const id = Number(req.params.id);
   const { type, startDate, endDate, reason, referenceLink } = req.body;
@@ -3353,6 +3449,57 @@ async function getEffectiveWorkHours(employeeId: number) {
     FROM employees e
     WHERE e.id=$1
   `, [employeeId]);
+  const hours = Number(r.rows[0]?.hours);
+  return Number.isFinite(hours) && hours > 0 ? hours : 3;
+}
+
+async function getEffectiveWorkHoursForDate(
+  employeeId: number,
+  dateText: string
+) {
+  const r = await query<any>(`
+    SELECT COALESCE(
+      (
+        SELECT wh.hours
+        FROM work_hours_settings wh
+        WHERE wh.scope='EMPLOYEE'
+          AND wh.scope_id=e.id
+          AND wh.updated_at::date <= $2::date
+        ORDER BY wh.updated_at DESC, wh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT wh.hours
+        FROM work_hours_settings wh
+        WHERE wh.scope='TEAM'
+          AND wh.scope_id=e.team_lead_id
+          AND wh.updated_at::date <= $2::date
+        ORDER BY wh.updated_at DESC, wh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT wh.hours
+        FROM work_hours_settings wh
+        WHERE wh.scope='DEPARTMENT'
+          AND wh.scope_id=e.department_id
+          AND wh.updated_at::date <= $2::date
+        ORDER BY wh.updated_at DESC, wh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT wh.hours
+        FROM work_hours_settings wh
+        WHERE wh.scope='DEFAULT'
+          AND wh.updated_at::date <= $2::date
+        ORDER BY wh.updated_at DESC, wh.id DESC
+        LIMIT 1
+      ),
+      3
+    )::numeric AS hours
+    FROM employees e
+    WHERE e.id=$1
+  `, [employeeId, dateText]);
+
   const hours = Number(r.rows[0]?.hours);
   return Number.isFinite(hours) && hours > 0 ? hours : 3;
 }
@@ -3474,6 +3621,119 @@ function countNeutralLeaveDaysAfterDueDate(
   return count;
 }
 
+export async function markAbsencesForDate(dateText?: string) {
+  const dateResult = await query<any>(
+    `SELECT COALESCE($1::date, current_date - interval '1 day')::date::text AS target_date`,
+    [dateText || null]
+  );
+
+  const targetDate = dateOnlyValue(dateResult.rows[0]?.target_date);
+
+  if (!targetDate || isSunday(targetDate)) {
+    return {
+      date: targetDate,
+      markedAbsent: 0,
+      markedLeave: 0
+    };
+  }
+
+  const employees = await query<any>(
+    `SELECT id
+     FROM employees
+     WHERE status='ACTIVE'
+       AND joining_date <= $1::date
+     ORDER BY id`,
+    [targetDate]
+  );
+
+  let markedAbsent = 0;
+  let markedLeave = 0;
+
+  for (const employee of employees.rows) {
+    const employeeId = Number(employee.id);
+
+    const existing = await query<any>(
+      `SELECT id
+       FROM attendance
+       WHERE employee_id=$1
+         AND work_date=$2::date
+       LIMIT 1`,
+      [employeeId, targetDate]
+    );
+
+    if (existing.rows[0]) continue;
+
+    const leave = await query<any>(
+      `SELECT leave_type
+       FROM leave_requests
+       WHERE employee_id=$1
+         AND status='APPROVED'
+         AND $2::date BETWEEN start_date AND end_date
+       ORDER BY
+         CASE WHEN leave_type='PAID' THEN 1 ELSE 2 END,
+         id DESC
+       LIMIT 1`,
+      [employeeId, targetDate]
+    );
+
+    if (leave.rows[0]) {
+      await query(
+        `INSERT INTO attendance(
+           employee_id,
+           work_date,
+           status,
+           attendance_mode,
+           location_text
+         )
+         VALUES(
+           $1,
+           $2::date,
+           'LEAVE',
+           'OFFLINE',
+           $3
+         )
+         ON CONFLICT(employee_id,work_date) DO NOTHING`,
+        [
+          employeeId,
+          targetDate,
+          `Approved ${String(leave.rows[0].leave_type).toUpperCase()} leave`
+        ]
+      );
+
+      markedLeave += 1;
+      continue;
+    }
+
+    await query(
+      `INSERT INTO attendance(
+         employee_id,
+         work_date,
+         status,
+         attendance_mode,
+         location_text
+       )
+       VALUES(
+         $1,
+         $2::date,
+         'ABSENT',
+         'OFFLINE',
+         'Automatically marked absent at end of working day'
+       )
+       ON CONFLICT(employee_id,work_date) DO NOTHING`,
+      [employeeId, targetDate]
+    );
+
+    markedAbsent += 1;
+  }
+
+  return {
+    date: targetDate,
+    markedAbsent,
+    markedLeave
+  };
+}
+
+
 export async function performance(req: Request, res: Response) {
   const requestedEmployeeId = Number(req.query.employeeId || 0);
   const requestedMonth = Number(req.query.month || 0);
@@ -3488,10 +3748,11 @@ export async function performance(req: Request, res: Response) {
       req.user!.role === 'TEAM_LEAD' &&
       !(await requireTeamAuthority(req, requestedEmployeeId))
     ) {
-      return res
-        .status(403)
-        .json({ message: 'This employee is outside your team.' });
+      return res.status(403).json({
+        message: 'This employee is outside your team.'
+      });
     }
+
     targets = [requestedEmployeeId];
   } else if (req.user!.role === 'TEAM_LEAD') {
     const team = await query<any>(
@@ -3501,6 +3762,7 @@ export async function performance(req: Request, res: Response) {
          AND status <> 'INACTIVE'`,
       [req.user!.employeeId]
     );
+
     targets = team.rows.map((row: any) => Number(row.id));
   } else {
     const employees = await query<any>(
@@ -3508,13 +3770,15 @@ export async function performance(req: Request, res: Response) {
        FROM employees
        WHERE status <> 'INACTIVE'`
     );
+
     targets = employees.rows.map((row: any) => Number(row.id));
   }
 
   targets = targets.filter(Number.isFinite);
+
   if (!targets.length) {
     return res.status(400).json({
-      message: 'No employees available for performance calculation.',
+      message: 'No employees available for performance calculation.'
     });
   }
 
@@ -3535,9 +3799,6 @@ export async function performance(req: Request, res: Response) {
     'SELECT current_date::text AS current_date'
   );
 
-  // dateOnlyValue() intentionally returns a YYYY-MM-DD string because the
-  // performance calculation compares and iterates dates as strings.
-  // Use a separate Date object only for month/year extraction.
   const systemCurrentDate = dateOnlyValue(
     dateResult.rows[0]?.current_date || new Date()
   );
@@ -3558,17 +3819,21 @@ export async function performance(req: Request, res: Response) {
 
   const monthStart = new Date(
     Date.UTC(calculationYear, calculationMonth - 1, 1)
-  );
+  )
+    .toISOString()
+    .slice(0, 10);
+
   const monthEnd = new Date(
     Date.UTC(calculationYear, calculationMonth, 0)
-  );
+  )
+    .toISOString()
+    .slice(0, 10);
 
-  // For the current month, calculate only up to today for attendance/tasks.
-  // The stored period still represents the complete calendar month.
   const isCurrentMonth =
     calculationYear === systemCurrentDateObj.getUTCFullYear() &&
     calculationMonth === systemCurrentDateObj.getUTCMonth() + 1;
 
+  // Future days never cause deductions. For a past month, every day is final.
   const calculationEnd = isCurrentMonth
     ? systemCurrentDate
     : monthEnd;
@@ -3587,150 +3852,172 @@ export async function performance(req: Request, res: Response) {
       ? dateOnlyValue(employeeMeta.rows[0].joining_date)
       : null;
 
-    const minimumWorkHours = await getEffectiveWorkHours(target);
-    const normalDayHours = safeNumber(minimumWorkHours, 3);
-    const saturdayHours = normalDayHours * 2;
-    const dailyDeduction = 100 / 26;
-
-    // Never calculate a score for dates before the employee joined.
+    // Performance never includes dates before the employee joined.
     const periodStart =
       joiningDate && joiningDate > monthStart
         ? joiningDate
         : monthStart;
 
-    const [attendanceResult, leaveResult, taskResult] = await Promise.all([
-      query<any>(
-        `SELECT
-           work_date::text AS work_date,
-           status,
-           check_in,
-           check_out,
-           CASE
-             WHEN check_in IS NULL THEN 0
-             WHEN check_out IS NOT NULL THEN COALESCE(total_hours, 0)
-             ELSE ROUND(
-               (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
-               2
-             )
-           END AS worked_hours,
-         
-           (
-
-             check_in IS NOT NULL
-
-             AND check_out IS NULL
-
-             AND work_date < current_date
-
-           ) AS checkout_missed
-         FROM attendance
-         WHERE employee_id=$1
-           AND work_date BETWEEN $2::date AND $3::date
-         ORDER BY work_date`,
-        [target, periodStart, calculationEnd]
-      ),
-      query<any>(
-        `SELECT
-           start_date::text AS start_date,
-           end_date::text AS end_date,
-           leave_type
-         FROM leave_requests
-         WHERE employee_id=$1
-           AND status='APPROVED'
-           AND end_date >= $2::date
-           AND start_date <= $3::date
-         ORDER BY start_date`,
-        [target, periodStart, monthEnd]
-      ),
-      query<any>(
-        `SELECT
-           id,
-           start_date::text AS start_date,
-           due_date,
-           status,
-           completed_at
-         FROM tasks
-         WHERE assigned_to=$1
-           AND created_at::date BETWEEN $2::date AND $3::date
-           AND status NOT IN ('CANCELLED','DRAFT')
-         ORDER BY created_at ASC, id ASC`,
-        [target, periodStart, calculationEnd]
-      ),
-    ]);
-
-    const attendanceByDate = new Map<string, any>();
-    for (const row of attendanceResult.rows) {
-      const rowDate = dateOnlyValue(row.work_date);
-
-      // A checked-in day from the past with no checkout is a half day.
-      // Treat its working hours as exactly 50% of that day's requirement.
-      if (row.checkout_missed) {
-        const requiredForDate = isSaturday(rowDate)
-          ? saturdayHours
-          : normalDayHours;
-        row.worked_hours = Number((requiredForDate / 2).toFixed(2));
-      }
-
-      attendanceByDate.set(rowDate, row);
+    if (periodStart > monthEnd) {
+      continue;
     }
 
-    const neutralLeaves = leaveResult.rows
-      .filter((row: any) =>
-        ['PAID', 'SICK'].includes(String(row.leave_type).toUpperCase())
-      )
-      .map((row: any) => ({
-        start_date: row.start_date,
-        end_date: row.end_date,
-      }));
+    // Dynamic monthly denominator:
+    // all working days in the employee's eligible part of the month, Sundays excluded.
+    let totalWorkingDays = 0;
 
-    const unpaidLeaves = leaveResult.rows
+    for (
+      let cursor = periodStart;
+      cursor <= monthEnd;
+      cursor = shiftDate(cursor, 1)
+    ) {
+      if (!isSunday(cursor)) {
+        totalWorkingDays += 1;
+      }
+    }
+
+    const dailyWeight =
+      totalWorkingDays > 0
+        ? 100 / totalWorkingDays
+        : 0;
+
+    const [attendanceResult, leaveResult, taskResult] =
+      await Promise.all([
+        query<any>(
+          `SELECT
+             work_date::text AS work_date,
+             status,
+             check_in,
+             check_out,
+             CASE
+               WHEN check_in IS NULL THEN 0
+               WHEN check_out IS NOT NULL THEN COALESCE(total_hours,0)
+               ELSE ROUND(
+                 (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
+                 2
+               )
+             END AS worked_hours,
+             (
+               check_in IS NOT NULL
+               AND check_out IS NULL
+               AND work_date < current_date
+             ) AS checkout_missed
+           FROM attendance
+           WHERE employee_id=$1
+             AND work_date BETWEEN $2::date AND $3::date
+           ORDER BY work_date`,
+          [target, periodStart, calculationEnd]
+        ),
+
+        query<any>(
+          `SELECT
+             start_date::text AS start_date,
+             end_date::text AS end_date,
+             leave_type
+           FROM leave_requests
+           WHERE employee_id=$1
+             AND status='APPROVED'
+             AND end_date >= $2::date
+             AND start_date <= $3::date
+           ORDER BY start_date`,
+          [target, periodStart, monthEnd]
+        ),
+
+        query<any>(
+          `SELECT
+             id,
+             start_date::text AS start_date,
+             due_date,
+             status,
+             completed_at
+           FROM tasks
+           WHERE assigned_to=$1
+             AND created_at::date BETWEEN $2::date AND $3::date
+             AND status NOT IN ('CANCELLED','DRAFT')
+           ORDER BY created_at ASC, id ASC`,
+          [target, periodStart, calculationEnd]
+        )
+      ]);
+
+    const attendanceByDate = new Map<string, any>();
+
+    for (const row of attendanceResult.rows) {
+      attendanceByDate.set(
+        dateOnlyValue(row.work_date),
+        row
+      );
+    }
+
+    // Only approved PAID leave is neutral.
+    // SICK and UNPAID leave still reduce attendance performance.
+    const paidLeaves = leaveResult.rows
       .filter(
         (row: any) =>
-          String(row.leave_type).toUpperCase() === 'UNPAID'
+          String(row.leave_type).toUpperCase() === 'PAID'
+      )
+      .map((row: any) => ({
+        start_date: row.start_date,
+        end_date: row.end_date
+      }));
+
+    const otherApprovedLeaves = leaveResult.rows
+      .filter(
+        (row: any) =>
+          String(row.leave_type).toUpperCase() !== 'PAID'
       )
       .map((row: any) => ({
         start_date: row.start_date,
         end_date: row.end_date,
+        leave_type: row.leave_type
       }));
 
     /*
-     * ATTENDANCE METRIC
-     * Attendance shortfall is shown as its own metric.
-     * It does not create the Task or Leave deduction buckets.
+     * =========================================================
+     * ATTENDANCE PERFORMANCE
+     * =========================================================
+     *
+     * Monthly attendance starts at 100%.
+     *
+     * One working day weight:
+     *   100 / dynamic working days in that month
+     *
+     * Full absence / approved non-paid leave:
+     *   lose the full day weight
+     *
+     * Partial day:
+     *   lose only the missing-hours fraction of the day weight
+     *
+     * Approved PAID leave:
+     *   lose 0
      */
-    const attendanceScores: number[] = [];
-    const workingDaysSeen: string[] = [];
+    let attendanceDeduction = 0;
 
     for (
       let cursor = periodStart;
       cursor <= calculationEnd;
       cursor = shiftDate(cursor, 1)
     ) {
-      if (isSunday(cursor)) continue;
-      if (isWithinLeave(cursor, neutralLeaves)) continue;
-
-      // Approved UNPAID leave is handled only by leaveDeduction below.
-      if (isWithinLeave(cursor, unpaidLeaves)) continue;
-
-      workingDaysSeen.push(cursor);
-
-      const requiredHours = isSaturday(cursor)
-        ? saturdayHours
-        : normalDayHours;
-
-      const record = attendanceByDate.get(cursor);
-
-      // Do not penalize an untouched current day.
-      if (!record && cursor === systemCurrentDate) {
-        attendanceScores.push(100);
+      if (isSunday(cursor)) {
         continue;
       }
 
-      if (
-        record &&
-        String(record.status).toUpperCase() === 'LEAVE'
-      ) {
-        attendanceScores.push(100);
+      // Approved PAID leave gives full attendance credit.
+      if (isWithinLeave(cursor, paidLeaves)) {
+        continue;
+      }
+
+      // Any other approved leave remains a full attendance deduction.
+      if (isWithinLeave(cursor, otherApprovedLeaves)) {
+        attendanceDeduction += dailyWeight;
+        continue;
+      }
+
+      const record = attendanceByDate.get(cursor);
+
+      // The current day is not automatically absent before end-of-day.
+      // If the employee has checked in, however, partial hours can already
+      // affect the current score.
+      if (!record && cursor === systemCurrentDate) {
         continue;
       }
 
@@ -3738,71 +4025,76 @@ export async function performance(req: Request, res: Response) {
         !record ||
         String(record.status).toUpperCase() === 'ABSENT'
       ) {
-        attendanceScores.push(0);
+        attendanceDeduction += dailyWeight;
         continue;
       }
 
-      const workedHours = Math.max(
+      const status = String(record.status || '').toUpperCase();
+
+      // A LEAVE attendance row is neutral only when its approved leave is PAID.
+      // Other approved leave was already handled above. A stray LEAVE row
+      // without a matching approved PAID request is treated as a full deduction.
+      if (status === 'LEAVE') {
+        attendanceDeduction += dailyWeight;
+        continue;
+      }
+
+      const requiredHours = await getEffectiveWorkHoursForDate(
+        target,
+        cursor
+      );
+
+      let workedHours = Math.max(
         0,
         safeNumber(record.worked_hours)
       );
-      const missingHours = Math.max(
-        0,
-        requiredHours - workedHours
-      );
 
-      const deduction = Math.min(
-        dailyDeduction,
-        missingHours * (dailyDeduction / requiredHours)
-      );
-
-      attendanceScores.push(
-        clampPercent(100 - deduction, 100)
-      );
-    }
-
-    /*
-     * LEAVE DEDUCTION
-     *
-     * Only APPROVED UNPAID leave.
-     * The complete leave interval inside the selected month is counted,
-     * even when those dates are in the future. This makes the deduction
-     * immediate after approval.
-     */
-    let unpaidLeaveDays = 0;
-
-    for (const leave of unpaidLeaves) {
-      let cursor = dateOnlyValue(leave.start_date);
-      const end = dateOnlyValue(leave.end_date);
-
-      const effectiveStart =
-        cursor < periodStart ? periodStart : cursor;
-      const effectiveEnd =
-        end > monthEnd ? monthEnd : end;
-
-      cursor = effectiveStart;
-
-      while (cursor <= effectiveEnd) {
-        if (!isSunday(cursor)) {
-          unpaidLeaveDays += 1;
-        }
-        cursor = shiftDate(cursor, 1);
+      // Historical check-in without checkout counts as half-day.
+      if (record.checkout_missed) {
+        workedHours = requiredHours / 2;
       }
+
+      const earnedFraction =
+        requiredHours > 0
+          ? Math.max(
+              0,
+              Math.min(
+                1,
+                workedHours / requiredHours
+              )
+            )
+          : 1;
+
+      attendanceDeduction +=
+        dailyWeight * (1 - earnedFraction);
     }
 
-    const leaveDeduction = Math.min(
-      100,
-      unpaidLeaveDays * dailyDeduction
+    attendanceDeduction = clampPercent(
+      attendanceDeduction,
+      0
+    );
+
+    const attendancePerformance = clampPercent(
+      100 - attendanceDeduction,
+      100
     );
 
     /*
-     * TASK DEDUCTION
+     * =========================================================
+     * TASK PERFORMANCE
+     * =========================================================
      *
-     * Task Deduction =
-     *   (total overdue calendar days across all tasks × 20)
-     *   ÷ total number of tasks
+     * Every task receives its own score.
+     * Task Performance = average of all task scores.
+     *
+     * Existing rule retained:
+     *   on/before due date = 100
+     *   each overdue calendar day = -20
+     *   minimum task score = 0
+     *
+     * Approved PAID leave pauses task-delay counting.
+     * Other leave types do not pause the deduction.
      */
-    let totalTaskOverdueDays = 0;
     const taskScores: number[] = [];
 
     const calendarDayNumber = (value: Date) =>
@@ -3844,93 +4136,54 @@ export async function performance(req: Request, res: Response) {
         )
       );
 
-      // Approved PAID/SICK leave pauses task-delay counting.
       extraDays = Math.max(
         0,
         extraDays -
           countNeutralLeaveDaysAfterDueDate(
             due,
             completed,
-            neutralLeaves
+            paidLeaves
           )
       );
 
-      totalTaskOverdueDays += extraDays;
       taskScores.push(
-        Math.max(0, 100 - extraDays * 20)
+        Math.max(
+          0,
+          100 - extraDays * 20
+        )
       );
     }
-
-    const taskDeduction = taskScores.length
-      ? Math.min(
-          100,
-          (totalTaskOverdueDays * 20) /
-            taskScores.length
-        )
-      : 0;
-
-    const deductions = Number(
-      Math.min(
-        100,
-        taskDeduction + leaveDeduction
-      ).toFixed(2)
-    );
-
-    const score = Number(
-      (100 - deductions).toFixed(2)
-    );
-
-    const attendance = clampPercent(
-      calculateAverage(attendanceScores, 100),
-      100
-    );
 
     const taskCompletion = clampPercent(
       calculateAverage(taskScores, 100),
       100
     );
 
-    const workingAttendanceDays = workingDaysSeen
-      .map((dateText) => attendanceByDate.get(dateText))
-      .filter(
-        (record) =>
-          record &&
-          String(record.status).toUpperCase() !==
-            'ABSENT'
-      );
+    const taskDeduction = clampPercent(
+      100 - taskCompletion,
+      0
+    );
 
-    const workingHours = workingAttendanceDays.length
-      ? clampPercent(
-          (workingAttendanceDays.reduce(
-            (sum: number, record: any) => {
-              const dateText = dateOnlyValue(
-                record.work_date
-              );
+    const deductions = Number(
+      Math.min(
+        100,
+        taskDeduction + attendanceDeduction
+      ).toFixed(2)
+    );
 
-              const requiredHours = isSaturday(
-                dateText
-              )
-                ? saturdayHours
-                : normalDayHours;
+    const score = Number(
+      Math.max(
+        0,
+        100 - deductions
+      ).toFixed(2)
+    );
 
-              return (
-                sum +
-                Math.min(
-                  safeNumber(record.worked_hours) /
-                    requiredHours,
-                  1
-                )
-              );
-            },
-            0
-          ) /
-            workingAttendanceDays.length) *
-            100,
-          100
-        )
-      : 100;
+    // Legacy columns are kept populated for DB compatibility.
+    // Frontend now uses only task_completion, attendance,
+    // task_deduction, attendance_deduction and score.
+    const currentEffectiveHours =
+      await getEffectiveWorkHours(target);
 
-    // Keep one record per employee per calendar month.
     await query(
       `DELETE FROM performance_scores
        WHERE employee_id=$1
@@ -3956,38 +4209,51 @@ export async function performance(req: Request, res: Response) {
          score
        )
        VALUES(
-         $1,$2,$3,$4,$5,$6,0,0,$7,$8,$9,$10,$11,$12
+         $1,$2,$3,$4,100,$5,0,0,$5,$6,$7,$8,$9,$10
        )
        RETURNING *`,
       [
         target,
         monthStart,
         monthEnd,
-        taskCompletion,
-        100,
-        attendance,
-        workingHours,
-        minimumWorkHours,
+        Number(taskCompletion.toFixed(2)),
+        Number(attendancePerformance.toFixed(2)),
+        currentEffectiveHours,
         Number(taskDeduction.toFixed(2)),
-        Number(leaveDeduction.toFixed(2)),
+
+        // Keep the old leave_deduction column as a compatibility
+        // storage slot for the new Attendance Deduction.
+        Number(attendanceDeduction.toFixed(2)),
+
         deductions,
-        score,
+        score
       ]
     );
 
     calculated.push({
       ...r.rows[0],
-      attendance_deduction: 0,
+
+      attendance_deduction: Number(
+        attendanceDeduction.toFixed(2)
+      ),
+
       task_deduction: Number(
         taskDeduction.toFixed(2)
       ),
+
+      // Kept only so older clients do not break.
       leave_deduction: Number(
-        leaveDeduction.toFixed(2)
+        attendanceDeduction.toFixed(2)
       ),
+
       deductions,
       score,
+      working_days: totalWorkingDays,
+      daily_attendance_weight: Number(
+        dailyWeight.toFixed(4)
+      ),
       month: calculationMonth,
-      year: calculationYear,
+      year: calculationYear
     });
   }
 
@@ -3999,7 +4265,7 @@ export async function performance(req: Request, res: Response) {
           count: calculated.length,
           scores: calculated,
           month: calculationMonth,
-          year: calculationYear,
+          year: calculationYear
         }
   );
 }
@@ -4067,6 +4333,9 @@ export async function performanceList(req: Request, res: Response) {
   res.json(
     r.rows.map((row: any) => ({
       ...row,
+      attendance_deduction: Number(
+        row.leave_deduction || 0
+      ),
       score: Number.isFinite(
         Number(row.safe_score)
       )
