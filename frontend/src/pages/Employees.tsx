@@ -19,6 +19,7 @@ export default function Employees() {
   const [selectedRole, setSelectedRole] = useState('EMPLOYEE');
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
+  const [selectedEmployee, setSelectedEmployee] = useState<any | null>(null);
 
   const [deleteUser, setDeleteUser] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -208,7 +209,11 @@ export default function Employees() {
             <tbody>
 
               {rows.map(r => (
-                <tr key={r.id}>
+                <tr
+                  key={r.id}
+                  onClick={() => setSelectedEmployee(r)}
+                  className="cursor-pointer transition hover:bg-slate-50"
+                >
 
                   <td>
                     <b>{r.employee_code}</b>
@@ -231,12 +236,13 @@ export default function Employees() {
                         <button
                           type="button"
                           className="inline-flex items-center justify-center rounded p-1 hover:bg-slate-100"
-                          onClick={() =>
+                          onClick={e => {
+                            e.stopPropagation();
                             setVisiblePasswords(prev => ({
                               ...prev,
                               [r.id]: !prev[r.id],
-                            }))
-                          }
+                            }));
+                          }}
                           aria-label={visiblePasswords[r.id] ? 'Hide password' : 'Show password'}
                           title={visiblePasswords[r.id] ? 'Hide password' : 'Show password'}
                         >
@@ -301,7 +307,8 @@ export default function Employees() {
 
                         <button
                           className="btn !px-3 !py-1.5"
-                          onClick={() => {
+                          onClick={e => {
+                            e.stopPropagation();
                             setEditing(r);
                             setSelectedRole(r.role || 'EMPLOYEE');
                             setShow(true);
@@ -313,7 +320,10 @@ export default function Employees() {
                         <button
                           className="btn !px-3 !py-1.5 text-red-600"
                           disabled={r.id === user?.employeeId}
-                          onClick={() => setDeleteUser(r)}
+                          onClick={e => {
+                            e.stopPropagation();
+                            setDeleteUser(r);
+                          }}
                         >
                           Delete
                         </button>
@@ -526,6 +536,24 @@ export default function Employees() {
               />
             </div>
 
+            <div className="sm:col-span-2">
+              <label className="label">
+                Profile Photo URL
+              </label>
+
+              <input
+                className="input mt-1"
+                name="photoUrl"
+                type="url"
+                placeholder="https://example.com/photo.jpg"
+                defaultValue={editing?.photo_url || ''}
+              />
+
+              <div className="mt-1 text-xs muted">
+                Paste the employee profile photo URL.
+              </div>
+            </div>
+
             <div>
               <label className="label">
                 Department
@@ -672,6 +700,167 @@ export default function Employees() {
 
           </form>
 
+        </Modal>
+      )}
+
+      {/* EMPLOYEE DETAILS MODAL */}
+      {selectedEmployee && (
+        <Modal
+          title="Employee Details"
+          onClose={() => setSelectedEmployee(null)}
+        >
+          <div className="space-y-6">
+
+            <div className="flex flex-col items-center gap-4 border-b border-slate-200 pb-6 sm:flex-row">
+
+              {selectedEmployee.photo_url ? (
+                <img
+                  src={selectedEmployee.photo_url}
+                  alt={`${selectedEmployee.first_name} ${selectedEmployee.last_name}`}
+                  className="h-28 w-28 rounded-full border-4 border-white object-cover shadow-md"
+                  onError={e => {
+                    e.currentTarget.style.display = 'none';
+                  }}
+                />
+              ) : (
+                <div className="flex h-28 w-28 items-center justify-center rounded-full bg-slate-100 text-3xl font-extrabold text-slate-700 shadow-sm">
+                  {selectedEmployee.first_name?.charAt(0)?.toUpperCase()}
+                  {selectedEmployee.last_name?.charAt(0)?.toUpperCase()}
+                </div>
+              )}
+
+              <div className="text-center sm:text-left">
+                <h2 className="text-2xl font-extrabold text-slate-900">
+                  {selectedEmployee.first_name}{' '}
+                  {selectedEmployee.last_name}
+                </h2>
+
+                <div className="mt-1 text-sm muted">
+                  {selectedEmployee.employee_code}
+                </div>
+
+                <div className="mt-3 flex flex-wrap justify-center gap-2 sm:justify-start">
+                  <span className="badge">
+                    {selectedEmployee.role?.replace(/_/g, ' ') || '—'}
+                  </span>
+
+                  <span className="badge">
+                    {selectedEmployee.user_type || '—'}
+                  </span>
+
+                  <span className="badge">
+                    {selectedEmployee.status || '—'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Email
+                </div>
+                <div className="mt-1 break-all font-medium">
+                  {selectedEmployee.email || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Phone
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.phone || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Job Title
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.job_title || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Department
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.department_name || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Team Lead
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.team_lead_name || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Admin
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.admin_name || '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Joining Date
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.joining_date
+                    ? new Date(selectedEmployee.joining_date).toLocaleDateString()
+                    : '—'}
+                </div>
+              </div>
+
+              <div className="rounded-xl bg-slate-50 p-4">
+                <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Account Status
+                </div>
+                <div className="mt-1 font-medium">
+                  {selectedEmployee.status || '—'}
+                </div>
+              </div>
+
+            </div>
+
+            <div className="flex justify-end gap-2 border-t border-slate-200 pt-4">
+
+              <button
+                type="button"
+                className="btn"
+                onClick={() => setSelectedEmployee(null)}
+              >
+                Close
+              </button>
+
+              {isSuper && (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => {
+                    setEditing(selectedEmployee);
+                    setSelectedRole(selectedEmployee.role || 'EMPLOYEE');
+                    setSelectedEmployee(null);
+                    setShow(true);
+                  }}
+                >
+                  Edit Employee
+                </button>
+              )}
+
+            </div>
+
+          </div>
         </Modal>
       )}
 

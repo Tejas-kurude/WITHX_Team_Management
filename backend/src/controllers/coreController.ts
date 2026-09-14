@@ -2881,13 +2881,57 @@ export async function checkOut(req: Request, res: Response) {
   const emp = req.user!.employeeId;
   const cur = await query<any>('SELECT * FROM attendance WHERE employee_id=$1 AND work_date=current_date', [emp]);
   if (!cur.rows[0]?.check_in) return res.status(400).json({ message: 'Check in first.' });
+
   let lat = null, lng = null;
+
+  // ONLINE attendance is remote and does not require GPS for checkout.
+  // OFFLINE attendance must be checked out from inside the office geofence.
   if (cur.rows[0].attendance_mode === 'OFFLINE') {
-    if (req.body.latitude == null || req.body.longitude == null) return res.status(400).json({ message: 'Location permission is required to check out from Offline attendance.' });
-    lat = req.body.latitude; lng = req.body.longitude;
+    if (req.body.latitude == null || req.body.longitude == null) {
+      return res.status(400).json({
+        message: 'Location permission is required to check out from Offline attendance.'
+      });
+    }
+
+    const s = await query<any>(
+      "SELECT key,value FROM system_settings WHERE key IN ('office_latitude','office_longitude','geofence_radius_m','office_address')"
+    );
+    const settings = Object.fromEntries(
+      s.rows.map((x: any) => [x.key, x.value])
+    );
+
+    if (!settings.office_latitude || !settings.office_longitude) {
+      return res.status(409).json({
+        message: 'Office location is not configured. Ask Admin/Super Admin to set company coordinates first.'
+      });
+    }
+
+    lat = Number(req.body.latitude);
+    lng = Number(req.body.longitude);
+    const distance = haversineMeters(
+      lat,
+      lng,
+      Number(settings.office_latitude),
+      Number(settings.office_longitude)
+    );
+    const radius = Number(settings.geofence_radius_m || 300);
+
+    // Offline checkout is allowed only while physically inside the office geofence.
+    if (distance > radius) {
+      return res.status(403).json({
+        message: `Checkout is allowed only inside the office premises. You are approximately ${Math.round(distance)}m from the configured office; allowed radius is ${radius}m.`
+      });
+    }
   }
-  const r = await query<any>(`UPDATE attendance SET check_out=now(),check_out_lat=$1,check_out_lng=$2,total_hours=ROUND((EXTRACT(EPOCH FROM(now()-check_in))/3600)::numeric,2) WHERE id=$3 RETURNING *`, [lat, lng, cur.rows[0].id]);
-  await audit(req.user?.userId, 'CHECK_OUT', 'ATTENDANCE', r.rows[0].id, { mode: cur.rows[0].attendance_mode }); res.json(r.rows[0]);
+
+  const r = await query<any>(
+    `UPDATE attendance SET check_out=now(),check_out_lat=$1,check_out_lng=$2,total_hours=ROUND((EXTRACT(EPOCH FROM(now()-check_in))/3600)::numeric,2) WHERE id=$3 RETURNING *`,
+    [lat, lng, cur.rows[0].id]
+  );
+  await audit(req.user?.userId, 'CHECK_OUT', 'ATTENDANCE', r.rows[0].id, {
+    mode: cur.rows[0].attendance_mode
+  });
+  res.json(r.rows[0]);
 }
 export async function listAttendance(req: Request, res: Response) {
   const { month = '', date = '', department = '', employeeId = '', mode = '', status = '', search = '' } = req.query as any;
@@ -2925,8 +2969,22 @@ export async function listAttendance(req: Request, res: Response) {
       CASE
         WHEN a.check_in IS NULL THEN 0
         WHEN a.check_out IS NOT NULL THEN COALESCE(a.total_hours, 0)
+        WHEN a.work_date < current_date THEN
+          ROUND(COALESCE(target.required_work_hours, 3) / 2, 2)
         ELSE ROUND((EXTRACT(EPOCH FROM (now() - a.check_in))/3600)::numeric, 2)
-      END AS worked_hours
+      END AS worked_hours,
+      (
+        a.check_in IS NOT NULL
+        AND a.check_out IS NULL
+        AND a.work_date < current_date
+      ) AS checkout_missed,
+      CASE
+        WHEN a.check_in IS NOT NULL
+         AND a.check_out IS NULL
+         AND a.work_date < current_date
+        THEN 'Half Day • Checkout missed'
+        ELSE NULL
+      END AS attendance_note
     FROM attendance a
     JOIN employees e ON e.id=a.employee_id
     LEFT JOIN users u ON u.employee_id=e.id
@@ -3396,7 +3454,17 @@ export async function performance(req: Request, res: Response) {
                (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
                2
              )
-           END AS worked_hours
+           END AS worked_hours,
+         
+           (
+
+             check_in IS NOT NULL
+
+             AND check_out IS NULL
+
+             AND work_date < current_date
+
+           ) AS checkout_missed
          FROM attendance
          WHERE employee_id=$1
            AND work_date BETWEEN $2::date AND $3::date
@@ -3434,7 +3502,18 @@ export async function performance(req: Request, res: Response) {
 
     const attendanceByDate = new Map<string, any>();
     for (const row of attendanceResult.rows) {
-      attendanceByDate.set(dateOnlyValue(row.work_date), row);
+      const rowDate = dateOnlyValue(row.work_date);
+
+      // A checked-in day from the past with no checkout is a half day.
+      // Treat its working hours as exactly 50% of that day's requirement.
+      if (row.checkout_missed) {
+        const requiredForDate = isSaturday(rowDate)
+          ? saturdayHours
+          : normalDayHours;
+        row.worked_hours = Number((requiredForDate / 2).toFixed(2));
+      }
+
+      attendanceByDate.set(rowDate, row);
     }
 
     const neutralLeaves = leaveResult.rows

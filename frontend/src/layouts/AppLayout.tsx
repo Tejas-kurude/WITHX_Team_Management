@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LayoutDashboard, Users, Building2, CalendarCheck, ClipboardList, FileText, Star, Bell, Activity, Settings, LogOut, BarChart3, Palmtree, Menu, X, UserCircle, Clock } from 'lucide-react';
+import { LayoutDashboard, Users, Building2, CalendarCheck, ClipboardList, FileText, Star, Bell, Activity, Settings, LogOut, BarChart3, Palmtree, Menu, X, UserCircle, Clock, Scale } from 'lucide-react';
 import { useState } from 'react';
 
 export default function AppLayout() {
@@ -20,6 +20,7 @@ export default function AppLayout() {
     ['Notifications', '/notifications', Bell],
     ['Reports & Analytics', '/analytics', BarChart3],
     ['Activity Logs', '/activity', Activity],
+    ['Legal & Policies', '/legal', Scale],
     ['Settings', '/settings', Settings],
   ] as const;
 

@@ -216,7 +216,13 @@ export default function Attendance(){
                 }
                 <td><span className={`badge ${modeClass(r.attendance_mode)}`}>{r.attendance_mode}</span></td>
                 <td>{r.check_in?new Date(r.check_in).toLocaleTimeString():'—'}</td>
-                <td>{r.check_out?new Date(r.check_out).toLocaleTimeString():'—'}</td>
+                <td>
+                  {r.check_out
+                    ? new Date(r.check_out).toLocaleTimeString()
+                    : r.checkout_missed
+                      ? <span className="font-extrabold text-red-600">Half Day • Checkout missed</span>
+                      : '—'}
+                </td>
                 <td>{formatDuration(r.required_work_hours)}</td>
                 <td className={r.check_in&&!r.check_out?'text-amber-700 font-semibold':''}>
                   {formatDuration(r.worked_hours ?? r.total_hours,r.check_in,r.check_out)}

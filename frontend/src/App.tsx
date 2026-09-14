@@ -16,6 +16,7 @@ import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Profile from './pages/Profile';
 import WorkHours from './pages/WorkHours';
+import Legal from './pages/Legal';
 
 function Guard() {
   const { user } = useAuth();
@@ -42,6 +43,7 @@ export default function App() {
           <Route path="/activity" element={<Activity />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/work-hours" element={<WorkHours />} />
+          <Route path="/legal" element={<Legal />} />
         </Route>
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
