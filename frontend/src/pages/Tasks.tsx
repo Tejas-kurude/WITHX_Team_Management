@@ -69,6 +69,7 @@ export default function Tasks() {
   const [publishDraftMode, setPublishDraftMode] = useState(false);
   const [deleteTask, setDeleteTask] = useState<any | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [creatingTask, setCreatingTask] = useState(false);
   const [selectedTask, setSelectedTask] = useState<any | null>(null);
 
   const [showSubmit, setShowSubmit] = useState(false);
@@ -356,6 +357,7 @@ export default function Tasks() {
   ) {
     e.preventDefault();
     setErr('');
+    setCreatingTask(false);
 
     try {
       const form = e.currentTarget;
@@ -469,7 +471,12 @@ export default function Tasks() {
           return next;
         });
       } else {
-        await api.post('/tasks', body);
+        setCreatingTask(true);
+        try {
+          await api.post('/tasks', body);
+        } finally {
+          setCreatingTask(false);
+        }
       }
 
       setShow(false);
@@ -2555,9 +2562,20 @@ async function toggleReviewHistory(task: any) {
                   type="submit"
                   name="saveMode"
                   value="CREATE"
-                  className="btn btn-primary"
+                  className="btn btn-primary inline-flex items-center justify-center gap-2"
+                  disabled={creatingTask}
                 >
-                  Create & Notify
+                  {creatingTask ? (
+                    <>
+                      <span
+                        className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent"
+                        aria-hidden="true"
+                      />
+                      Creating...
+                    </>
+                  ) : (
+                    'Create & Notify'
+                  )}
                 </button>
               </div>
             )}
