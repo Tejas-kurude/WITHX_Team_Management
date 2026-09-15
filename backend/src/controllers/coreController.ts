@@ -1079,7 +1079,7 @@ if (title && String(title).trim().length > 500) {
 
   // Drafts belong to the creator and are not assigned/notified until published.
   if (draft) {
-    ids = [req.user!.employeeId];
+    ids = [req.user!.employeeId!];
   }
   if (!draft && type === 'INDIVIDUAL') ids = [Number(assignedTo)].filter(Boolean);
   if (!draft && type === 'MULTIPLE') ids = (Array.isArray(assignedToIds) ? assignedToIds : String(assignedToIds || '').split(',')).map(Number).filter(Boolean);
@@ -3870,11 +3870,9 @@ export async function performance(req: Request, res: Response) {
       ? requestedYear
       : systemCurrentDateObj.getUTCFullYear();
 
-  const monthStart = new Date(
-    Date.UTC(calculationYear, calculationMonth - 1, 1)
-  );
-  const monthEnd = new Date(
-    Date.UTC(calculationYear, calculationMonth, 0)
+  const monthStart = `${calculationYear}-${String(calculationMonth).padStart(2, '0')}-01`;
+  const monthEnd = dateOnlyValue(
+    new Date(Date.UTC(calculationYear, calculationMonth, 0))
   );
 
   // For the current month, calculate only up to today for attendance/tasks.
@@ -4693,5 +4691,5 @@ export async function exportCsv(req: Request, res: Response) {
   else if (kind === 'performance') rows = (await query<any>(`SELECT e.employee_code,e.user_type,e.first_name||' '||e.last_name employee,p.period_start,p.period_end,p.task_completion,p.on_time,p.attendance,p.working_hours,p.required_work_hours,p.score FROM performance_scores p JOIN employees e ON e.id=p.employee_id ${team ? 'WHERE e.team_lead_id=$1' : ''} ORDER BY p.period_end DESC,p.created_at DESC`, team ? [emp] : [])).rows;
   else return res.status(400).json({ message: 'Unknown export type' });
   const escape = (v: any) => `"${String(v ?? '').replaceAll('"', '""')}"`; const headers = rows[0] ? Object.keys(rows[0]) : []; const csv = [headers.map(escape).join(','), ...rows.map(row => headers.map(h => escape(row[h])).join(','))].join('\n');
-  res.setHeader('Content-Type', 'text/csv'); res.setHeader('Content-Disposition', `attachment; filename=withx-${kind}.csv`); res.send(csv);
+  res.header('Content-Type', 'text/csv'); res.header('Content-Disposition', `attachment; filename=withx-${kind}.csv`); res.send(csv);
 }

@@ -21,12 +21,15 @@ app.use(
   })
 );
 
+// The installed CORS typings are currently incompatible with the Express
+// typings in this project, even though the middleware is valid at runtime.
+// Cast only this middleware to avoid changing the existing CORS behaviour.
 app.use(
   cors({
     origin:
-      process.env.FRONTEND_URL?.split(',') ||
+      process.env.FRONTEND_URL?.split(',').map((value) => value.trim()) ||
       ['http://localhost:5173']
-  })
+  }) as any
 );
 
 app.use(
@@ -61,9 +64,8 @@ app.use('/api', routes);
 app.use(errorHandler);
 
 // Run the end-of-day attendance finalizer once per minute.
-// markEndOfDayAbsences() itself checks the database clock and only performs
-// the absence finalization during the 23:59 minute, so this remains
-// idempotent and independent of the exact second when the server started.
+// markEndOfDayAbsences() uses the PostgreSQL clock and only writes ABSENT
+// records during the 23:59 minute, so repeated calls are safe.
 const endOfDayAttendanceTimer = setInterval(() => {
   void markEndOfDayAbsences();
 }, 60_000);
@@ -77,6 +79,6 @@ app.listen(
   port,
   () =>
     console.log(
-      `WITHX API running on http://localhost:${port}`
+      `WITHX API running on port ${port}`
     )
 );
