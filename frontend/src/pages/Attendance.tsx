@@ -31,6 +31,7 @@ export default function Attendance(){
   const {user}=useAuth();
   const [searchParams]=useSearchParams();
   const [today,setToday]=useState<any>(null),[rows,setRows]=useState<any[]>([]),[msg,setMsg]=useState(''),[err,setErr]=useState(''),[busy,setBusy]=useState(false),[mode,setMode]=useState<'ONLINE'|'OFFLINE'>('OFFLINE'),[search,setSearch]=useState(''),[actionLoading,setActionLoading]=useState('');
+  const onApprovedLeave=String(today?.status||'').toUpperCase()==='LEAVE';
 
   const statusFilter=searchParams.get('status')||'';
   const dateFilter=searchParams.get('date')||'';
@@ -71,7 +72,12 @@ export default function Attendance(){
   }
 
   function mark(action:'check-in'|'check-out'){
-    setMsg('');setErr('');setBusy(true);
+    setMsg('');setErr('');
+    if(action==='check-in' && onApprovedLeave){
+      setErr('Check-in is not allowed today because you are on approved leave.');
+      return;
+    }
+    setBusy(true);
     setActionLoading(action==='check-in'?'Checking you in…':'Checking you out…');
     const effectiveMode=today?.attendance_mode||mode;
     if(effectiveMode==='ONLINE'){void send(action,{mode:'ONLINE'});return}
@@ -108,7 +114,7 @@ export default function Attendance(){
             <div className="mt-2 flex gap-2">
               <button
                 type="button"
-                disabled={!!today?.check_in}
+                disabled={!!today?.check_in||onApprovedLeave}
                 onClick={()=>setMode('ONLINE')}
                 className={`inline-flex min-w-[104px] items-center justify-center rounded-xl border px-5 py-2.5 text-sm font-extrabold leading-none transition-all ${
                   mode==='ONLINE'
@@ -120,7 +126,7 @@ export default function Attendance(){
               </button>
               <button
                 type="button"
-                disabled={!!today?.check_in}
+                disabled={!!today?.check_in||onApprovedLeave}
                 onClick={()=>setMode('OFFLINE')}
                 className={`inline-flex min-w-[104px] items-center justify-center rounded-xl border px-5 py-2.5 text-sm font-extrabold leading-none transition-all ${
                   mode==='OFFLINE'
@@ -138,6 +144,7 @@ export default function Attendance(){
             <div className="text-sm muted">Today's Status</div>
             <div className="mt-1 text-2xl font-extrabold">{today?.status||'Not checked in'}</div>
             <div className="mt-1 text-xs muted">Mode: {today?.attendance_mode||mode} {today?.location_verified?'• GPS verified':''}</div>
+            {onApprovedLeave&&<div className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-sm font-semibold text-rose-700">You are on approved leave today. Check-in is disabled for the duration of your approved leave.</div>}
             {today?.check_in&&
               <div className="mt-1 text-xs muted">
                 Work duration: {formatDuration(today?.worked_hours ?? today?.total_hours,today?.check_in,today?.check_out)}
@@ -147,7 +154,7 @@ export default function Attendance(){
             <div className="mt-4 flex flex-wrap gap-3">
               <button
                 type="button"
-                disabled={busy||!!today?.check_in}
+                disabled={busy||!!today?.check_in||onApprovedLeave}
                 onClick={()=>mark('check-in')}
                 className="inline-flex min-w-[132px] items-center justify-center gap-2 rounded-xl border border-[#B8862C] bg-[#D6A94A] px-5 py-2.5 text-sm font-extrabold leading-none text-[#171717] shadow-md transition-all hover:bg-[#C99B3D] disabled:cursor-not-allowed disabled:opacity-50"
               >

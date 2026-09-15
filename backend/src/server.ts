@@ -7,6 +7,7 @@ import path from 'path';
 
 import routes from './routes/index.js';
 import { errorHandler } from './middleware/error.js';
+import { markEndOfDayAbsences } from './controllers/coreController.js';
 
 dotenv.config();
 
@@ -58,6 +59,16 @@ app.get(
 app.use('/api', routes);
 
 app.use(errorHandler);
+
+// Run the end-of-day attendance finalizer once per minute.
+// markEndOfDayAbsences() itself checks the database clock and only performs
+// the absence finalization during the 23:59 minute, so this remains
+// idempotent and independent of the exact second when the server started.
+const endOfDayAttendanceTimer = setInterval(() => {
+  void markEndOfDayAbsences();
+}, 60_000);
+
+endOfDayAttendanceTimer.unref?.();
 
 const port =
   Number(process.env.PORT || 5000);

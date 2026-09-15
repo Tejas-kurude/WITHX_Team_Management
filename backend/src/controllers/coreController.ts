@@ -3748,11 +3748,10 @@ export async function performance(req: Request, res: Response) {
       req.user!.role === 'TEAM_LEAD' &&
       !(await requireTeamAuthority(req, requestedEmployeeId))
     ) {
-      return res.status(403).json({
-        message: 'This employee is outside your team.'
-      });
+      return res
+        .status(403)
+        .json({ message: 'This employee is outside your team.' });
     }
-
     targets = [requestedEmployeeId];
   } else if (req.user!.role === 'TEAM_LEAD') {
     const team = await query<any>(
@@ -3762,7 +3761,6 @@ export async function performance(req: Request, res: Response) {
          AND status <> 'INACTIVE'`,
       [req.user!.employeeId]
     );
-
     targets = team.rows.map((row: any) => Number(row.id));
   } else {
     const employees = await query<any>(
@@ -3770,15 +3768,13 @@ export async function performance(req: Request, res: Response) {
        FROM employees
        WHERE status <> 'INACTIVE'`
     );
-
     targets = employees.rows.map((row: any) => Number(row.id));
   }
 
   targets = targets.filter(Number.isFinite);
-
   if (!targets.length) {
     return res.status(400).json({
-      message: 'No employees available for performance calculation.'
+      message: 'No employees available for performance calculation.',
     });
   }
 
@@ -3799,6 +3795,9 @@ export async function performance(req: Request, res: Response) {
     'SELECT current_date::text AS current_date'
   );
 
+  // dateOnlyValue() intentionally returns a YYYY-MM-DD string because the
+  // performance calculation compares and iterates dates as strings.
+  // Use a separate Date object only for month/year extraction.
   const systemCurrentDate = dateOnlyValue(
     dateResult.rows[0]?.current_date || new Date()
   );
@@ -3819,21 +3818,17 @@ export async function performance(req: Request, res: Response) {
 
   const monthStart = new Date(
     Date.UTC(calculationYear, calculationMonth - 1, 1)
-  )
-    .toISOString()
-    .slice(0, 10);
-
+  );
   const monthEnd = new Date(
     Date.UTC(calculationYear, calculationMonth, 0)
-  )
-    .toISOString()
-    .slice(0, 10);
+  );
 
+  // For the current month, calculate only up to today for attendance/tasks.
+  // The stored period still represents the complete calendar month.
   const isCurrentMonth =
     calculationYear === systemCurrentDateObj.getUTCFullYear() &&
     calculationMonth === systemCurrentDateObj.getUTCMonth() + 1;
 
-  // Future days never cause deductions. For a past month, every day is final.
   const calculationEnd = isCurrentMonth
     ? systemCurrentDate
     : monthEnd;
@@ -3852,172 +3847,150 @@ export async function performance(req: Request, res: Response) {
       ? dateOnlyValue(employeeMeta.rows[0].joining_date)
       : null;
 
-    // Performance never includes dates before the employee joined.
+    const minimumWorkHours = await getEffectiveWorkHours(target);
+    const normalDayHours = safeNumber(minimumWorkHours, 3);
+    const saturdayHours = normalDayHours * 2;
+    const dailyDeduction = 100 / 26;
+
+    // Never calculate a score for dates before the employee joined.
     const periodStart =
       joiningDate && joiningDate > monthStart
         ? joiningDate
         : monthStart;
 
-    if (periodStart > monthEnd) {
-      continue;
-    }
+    const [attendanceResult, leaveResult, taskResult] = await Promise.all([
+      query<any>(
+        `SELECT
+           work_date::text AS work_date,
+           status,
+           check_in,
+           check_out,
+           CASE
+             WHEN check_in IS NULL THEN 0
+             WHEN check_out IS NOT NULL THEN COALESCE(total_hours, 0)
+             ELSE ROUND(
+               (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
+               2
+             )
+           END AS worked_hours,
+         
+           (
 
-    // Dynamic monthly denominator:
-    // all working days in the employee's eligible part of the month, Sundays excluded.
-    let totalWorkingDays = 0;
+             check_in IS NOT NULL
 
-    for (
-      let cursor = periodStart;
-      cursor <= monthEnd;
-      cursor = shiftDate(cursor, 1)
-    ) {
-      if (!isSunday(cursor)) {
-        totalWorkingDays += 1;
-      }
-    }
+             AND check_out IS NULL
 
-    const dailyWeight =
-      totalWorkingDays > 0
-        ? 100 / totalWorkingDays
-        : 0;
+             AND work_date < current_date
 
-    const [attendanceResult, leaveResult, taskResult] =
-      await Promise.all([
-        query<any>(
-          `SELECT
-             work_date::text AS work_date,
-             status,
-             check_in,
-             check_out,
-             CASE
-               WHEN check_in IS NULL THEN 0
-               WHEN check_out IS NOT NULL THEN COALESCE(total_hours,0)
-               ELSE ROUND(
-                 (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
-                 2
-               )
-             END AS worked_hours,
-             (
-               check_in IS NOT NULL
-               AND check_out IS NULL
-               AND work_date < current_date
-             ) AS checkout_missed
-           FROM attendance
-           WHERE employee_id=$1
-             AND work_date BETWEEN $2::date AND $3::date
-           ORDER BY work_date`,
-          [target, periodStart, calculationEnd]
-        ),
-
-        query<any>(
-          `SELECT
-             start_date::text AS start_date,
-             end_date::text AS end_date,
-             leave_type
-           FROM leave_requests
-           WHERE employee_id=$1
-             AND status='APPROVED'
-             AND end_date >= $2::date
-             AND start_date <= $3::date
-           ORDER BY start_date`,
-          [target, periodStart, monthEnd]
-        ),
-
-        query<any>(
-          `SELECT
-             id,
-             start_date::text AS start_date,
-             due_date,
-             status,
-             completed_at
-           FROM tasks
-           WHERE assigned_to=$1
-             AND created_at::date BETWEEN $2::date AND $3::date
-             AND status NOT IN ('CANCELLED','DRAFT')
-           ORDER BY created_at ASC, id ASC`,
-          [target, periodStart, calculationEnd]
-        )
-      ]);
+           ) AS checkout_missed
+         FROM attendance
+         WHERE employee_id=$1
+           AND work_date BETWEEN $2::date AND $3::date
+         ORDER BY work_date`,
+        [target, periodStart, calculationEnd]
+      ),
+      query<any>(
+        `SELECT
+           start_date::text AS start_date,
+           end_date::text AS end_date,
+           leave_type
+         FROM leave_requests
+         WHERE employee_id=$1
+           AND status='APPROVED'
+           AND end_date >= $2::date
+           AND start_date <= $3::date
+         ORDER BY start_date`,
+        [target, periodStart, monthEnd]
+      ),
+      query<any>(
+        `SELECT
+           id,
+           start_date::text AS start_date,
+           due_date,
+           status,
+           completed_at
+         FROM tasks
+         WHERE assigned_to=$1
+           AND created_at::date BETWEEN $2::date AND $3::date
+           AND status NOT IN ('CANCELLED','DRAFT')
+         ORDER BY created_at ASC, id ASC`,
+        [target, periodStart, calculationEnd]
+      ),
+    ]);
 
     const attendanceByDate = new Map<string, any>();
-
     for (const row of attendanceResult.rows) {
-      attendanceByDate.set(
-        dateOnlyValue(row.work_date),
-        row
-      );
+      const rowDate = dateOnlyValue(row.work_date);
+
+      // A checked-in day from the past with no checkout is a half day.
+      // Treat its working hours as exactly 50% of that day's requirement.
+      if (row.checkout_missed) {
+        const requiredForDate = isSaturday(rowDate)
+          ? saturdayHours
+          : normalDayHours;
+        row.worked_hours = Number((requiredForDate / 2).toFixed(2));
+      }
+
+      attendanceByDate.set(rowDate, row);
     }
 
-    // Only approved PAID leave is neutral.
-    // SICK and UNPAID leave still reduce attendance performance.
-    const paidLeaves = leaveResult.rows
-      .filter(
-        (row: any) =>
-          String(row.leave_type).toUpperCase() === 'PAID'
-      )
-      .map((row: any) => ({
-        start_date: row.start_date,
-        end_date: row.end_date
-      }));
-
-    const otherApprovedLeaves = leaveResult.rows
-      .filter(
-        (row: any) =>
-          String(row.leave_type).toUpperCase() !== 'PAID'
+    const neutralLeaves = leaveResult.rows
+      .filter((row: any) =>
+        ['PAID', 'SICK'].includes(String(row.leave_type).toUpperCase())
       )
       .map((row: any) => ({
         start_date: row.start_date,
         end_date: row.end_date,
-        leave_type: row.leave_type
+      }));
+
+    const unpaidLeaves = leaveResult.rows
+      .filter(
+        (row: any) =>
+          String(row.leave_type).toUpperCase() === 'UNPAID'
+      )
+      .map((row: any) => ({
+        start_date: row.start_date,
+        end_date: row.end_date,
       }));
 
     /*
-     * =========================================================
-     * ATTENDANCE PERFORMANCE
-     * =========================================================
-     *
-     * Monthly attendance starts at 100%.
-     *
-     * One working day weight:
-     *   100 / dynamic working days in that month
-     *
-     * Full absence / approved non-paid leave:
-     *   lose the full day weight
-     *
-     * Partial day:
-     *   lose only the missing-hours fraction of the day weight
-     *
-     * Approved PAID leave:
-     *   lose 0
+     * ATTENDANCE METRIC
+     * Attendance shortfall is shown as its own metric.
+     * It does not create the Task or Leave deduction buckets.
      */
-    let attendanceDeduction = 0;
+    const attendanceScores: number[] = [];
+    const workingDaysSeen: string[] = [];
 
     for (
       let cursor = periodStart;
       cursor <= calculationEnd;
       cursor = shiftDate(cursor, 1)
     ) {
-      if (isSunday(cursor)) {
-        continue;
-      }
+      if (isSunday(cursor)) continue;
+      if (isWithinLeave(cursor, neutralLeaves)) continue;
 
-      // Approved PAID leave gives full attendance credit.
-      if (isWithinLeave(cursor, paidLeaves)) {
-        continue;
-      }
+      // Approved UNPAID leave is handled only by leaveDeduction below.
+      if (isWithinLeave(cursor, unpaidLeaves)) continue;
 
-      // Any other approved leave remains a full attendance deduction.
-      if (isWithinLeave(cursor, otherApprovedLeaves)) {
-        attendanceDeduction += dailyWeight;
-        continue;
-      }
+      workingDaysSeen.push(cursor);
+
+      const requiredHours = isSaturday(cursor)
+        ? saturdayHours
+        : normalDayHours;
 
       const record = attendanceByDate.get(cursor);
 
-      // The current day is not automatically absent before end-of-day.
-      // If the employee has checked in, however, partial hours can already
-      // affect the current score.
+      // Do not penalize an untouched current day.
       if (!record && cursor === systemCurrentDate) {
+        attendanceScores.push(100);
+        continue;
+      }
+
+      if (
+        record &&
+        String(record.status).toUpperCase() === 'LEAVE'
+      ) {
+        attendanceScores.push(100);
         continue;
       }
 
@@ -4025,76 +3998,71 @@ export async function performance(req: Request, res: Response) {
         !record ||
         String(record.status).toUpperCase() === 'ABSENT'
       ) {
-        attendanceDeduction += dailyWeight;
+        attendanceScores.push(0);
         continue;
       }
 
-      const status = String(record.status || '').toUpperCase();
-
-      // A LEAVE attendance row is neutral only when its approved leave is PAID.
-      // Other approved leave was already handled above. A stray LEAVE row
-      // without a matching approved PAID request is treated as a full deduction.
-      if (status === 'LEAVE') {
-        attendanceDeduction += dailyWeight;
-        continue;
-      }
-
-      const requiredHours = await getEffectiveWorkHoursForDate(
-        target,
-        cursor
-      );
-
-      let workedHours = Math.max(
+      const workedHours = Math.max(
         0,
         safeNumber(record.worked_hours)
       );
+      const missingHours = Math.max(
+        0,
+        requiredHours - workedHours
+      );
 
-      // Historical check-in without checkout counts as half-day.
-      if (record.checkout_missed) {
-        workedHours = requiredHours / 2;
-      }
+      const deduction = Math.min(
+        dailyDeduction,
+        missingHours * (dailyDeduction / requiredHours)
+      );
 
-      const earnedFraction =
-        requiredHours > 0
-          ? Math.max(
-              0,
-              Math.min(
-                1,
-                workedHours / requiredHours
-              )
-            )
-          : 1;
-
-      attendanceDeduction +=
-        dailyWeight * (1 - earnedFraction);
+      attendanceScores.push(
+        clampPercent(100 - deduction, 100)
+      );
     }
 
-    attendanceDeduction = clampPercent(
-      attendanceDeduction,
-      0
-    );
+    /*
+     * LEAVE DEDUCTION
+     *
+     * Only APPROVED UNPAID leave.
+     * The complete leave interval inside the selected month is counted,
+     * even when those dates are in the future. This makes the deduction
+     * immediate after approval.
+     */
+    let unpaidLeaveDays = 0;
 
-    const attendancePerformance = clampPercent(
-      100 - attendanceDeduction,
-      100
+    for (const leave of unpaidLeaves) {
+      let cursor = dateOnlyValue(leave.start_date);
+      const end = dateOnlyValue(leave.end_date);
+
+      const effectiveStart =
+        cursor < periodStart ? periodStart : cursor;
+      const effectiveEnd =
+        end > monthEnd ? monthEnd : end;
+
+      cursor = effectiveStart;
+
+      while (cursor <= effectiveEnd) {
+        if (!isSunday(cursor)) {
+          unpaidLeaveDays += 1;
+        }
+        cursor = shiftDate(cursor, 1);
+      }
+    }
+
+    const leaveDeduction = Math.min(
+      100,
+      unpaidLeaveDays * dailyDeduction
     );
 
     /*
-     * =========================================================
-     * TASK PERFORMANCE
-     * =========================================================
+     * TASK DEDUCTION
      *
-     * Every task receives its own score.
-     * Task Performance = average of all task scores.
-     *
-     * Existing rule retained:
-     *   on/before due date = 100
-     *   each overdue calendar day = -20
-     *   minimum task score = 0
-     *
-     * Approved PAID leave pauses task-delay counting.
-     * Other leave types do not pause the deduction.
+     * Task Deduction =
+     *   (total overdue calendar days across all tasks × 20)
+     *   ÷ total number of tasks
      */
+    let totalTaskOverdueDays = 0;
     const taskScores: number[] = [];
 
     const calendarDayNumber = (value: Date) =>
@@ -4136,54 +4104,93 @@ export async function performance(req: Request, res: Response) {
         )
       );
 
+      // Approved PAID/SICK leave pauses task-delay counting.
       extraDays = Math.max(
         0,
         extraDays -
           countNeutralLeaveDaysAfterDueDate(
             due,
             completed,
-            paidLeaves
+            neutralLeaves
           )
       );
 
+      totalTaskOverdueDays += extraDays;
       taskScores.push(
-        Math.max(
-          0,
-          100 - extraDays * 20
-        )
+        Math.max(0, 100 - extraDays * 20)
       );
     }
+
+    const taskDeduction = taskScores.length
+      ? Math.min(
+          100,
+          (totalTaskOverdueDays * 20) /
+            taskScores.length
+        )
+      : 0;
+
+    const deductions = Number(
+      Math.min(
+        100,
+        taskDeduction + leaveDeduction
+      ).toFixed(2)
+    );
+
+    const score = Number(
+      (100 - deductions).toFixed(2)
+    );
+
+    const attendance = clampPercent(
+      calculateAverage(attendanceScores, 100),
+      100
+    );
 
     const taskCompletion = clampPercent(
       calculateAverage(taskScores, 100),
       100
     );
 
-    const taskDeduction = clampPercent(
-      100 - taskCompletion,
-      0
-    );
+    const workingAttendanceDays = workingDaysSeen
+      .map((dateText) => attendanceByDate.get(dateText))
+      .filter(
+        (record) =>
+          record &&
+          String(record.status).toUpperCase() !==
+            'ABSENT'
+      );
 
-    const deductions = Number(
-      Math.min(
-        100,
-        taskDeduction + attendanceDeduction
-      ).toFixed(2)
-    );
+    const workingHours = workingAttendanceDays.length
+      ? clampPercent(
+          (workingAttendanceDays.reduce(
+            (sum: number, record: any) => {
+              const dateText = dateOnlyValue(
+                record.work_date
+              );
 
-    const score = Number(
-      Math.max(
-        0,
-        100 - deductions
-      ).toFixed(2)
-    );
+              const requiredHours = isSaturday(
+                dateText
+              )
+                ? saturdayHours
+                : normalDayHours;
 
-    // Legacy columns are kept populated for DB compatibility.
-    // Frontend now uses only task_completion, attendance,
-    // task_deduction, attendance_deduction and score.
-    const currentEffectiveHours =
-      await getEffectiveWorkHours(target);
+              return (
+                sum +
+                Math.min(
+                  safeNumber(record.worked_hours) /
+                    requiredHours,
+                  1
+                )
+              );
+            },
+            0
+          ) /
+            workingAttendanceDays.length) *
+            100,
+          100
+        )
+      : 100;
 
+    // Keep one record per employee per calendar month.
     await query(
       `DELETE FROM performance_scores
        WHERE employee_id=$1
@@ -4209,51 +4216,38 @@ export async function performance(req: Request, res: Response) {
          score
        )
        VALUES(
-         $1,$2,$3,$4,100,$5,0,0,$5,$6,$7,$8,$9,$10
+         $1,$2,$3,$4,$5,$6,0,0,$7,$8,$9,$10,$11,$12
        )
        RETURNING *`,
       [
         target,
         monthStart,
         monthEnd,
-        Number(taskCompletion.toFixed(2)),
-        Number(attendancePerformance.toFixed(2)),
-        currentEffectiveHours,
+        taskCompletion,
+        100,
+        attendance,
+        workingHours,
+        minimumWorkHours,
         Number(taskDeduction.toFixed(2)),
-
-        // Keep the old leave_deduction column as a compatibility
-        // storage slot for the new Attendance Deduction.
-        Number(attendanceDeduction.toFixed(2)),
-
+        Number(leaveDeduction.toFixed(2)),
         deductions,
-        score
+        score,
       ]
     );
 
     calculated.push({
       ...r.rows[0],
-
-      attendance_deduction: Number(
-        attendanceDeduction.toFixed(2)
-      ),
-
+      attendance_deduction: 0,
       task_deduction: Number(
         taskDeduction.toFixed(2)
       ),
-
-      // Kept only so older clients do not break.
       leave_deduction: Number(
-        attendanceDeduction.toFixed(2)
+        leaveDeduction.toFixed(2)
       ),
-
       deductions,
       score,
-      working_days: totalWorkingDays,
-      daily_attendance_weight: Number(
-        dailyWeight.toFixed(4)
-      ),
       month: calculationMonth,
-      year: calculationYear
+      year: calculationYear,
     });
   }
 
@@ -4265,7 +4259,7 @@ export async function performance(req: Request, res: Response) {
           count: calculated.length,
           scores: calculated,
           month: calculationMonth,
-          year: calculationYear
+          year: calculationYear,
         }
   );
 }
