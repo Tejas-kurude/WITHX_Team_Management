@@ -12,6 +12,60 @@ const isManager = (role?: string) => ['SUPER_ADMIN', 'ADMIN', 'TEAM_LEAD'].inclu
 const numOrNull = (v: any) => v === '' || v === undefined || v === null ? null : Number(v);
 const textOrNull = (v: any) => v === '' || v === undefined || v === null ? null : String(v);
 
+// At 11:59 PM, finalize today's attendance for active employees who never
+// checked in. Approved leave is excluded, and Sundays are not working days.
+export async function markEndOfDayAbsences() {
+  try {
+    const clock = await query<any>(
+      `SELECT current_date::text AS work_date,
+              EXTRACT(HOUR FROM current_time)::int AS hour,
+              EXTRACT(MINUTE FROM current_time)::int AS minute,
+              EXTRACT(DOW FROM current_date)::int AS dow`
+    );
+
+    const row = clock.rows[0];
+
+    // Run only at 11:59 PM. PostgreSQL provides the authoritative date/time.
+    if (!row || row.hour !== 23 || row.minute !== 59 || row.dow === 0) {
+      return;
+    }
+
+    await query(
+      `INSERT INTO attendance(
+         employee_id,
+         work_date,
+         status,
+         attendance_mode,
+         location_text
+       )
+       SELECT
+         e.id,
+         $1::date,
+         'ABSENT',
+         'OFFLINE',
+         'Auto-marked absent at end of day'
+       FROM employees e
+       LEFT JOIN attendance a
+         ON a.employee_id = e.id
+        AND a.work_date = $1::date
+       WHERE e.status = 'ACTIVE'
+         AND a.id IS NULL
+         AND NOT EXISTS (
+           SELECT 1
+           FROM leave_requests lr
+           WHERE lr.employee_id = e.id
+             AND lr.status = 'APPROVED'
+             AND lr.start_date <= $1::date
+             AND lr.end_date >= $1::date
+         )
+       ON CONFLICT(employee_id, work_date) DO NOTHING`,
+      [row.work_date]
+    );
+  } catch (error) {
+    console.error('End-of-day attendance finalization failed:', error);
+  }
+}
+
 
 async function saveProfilePhoto(fileName: any, fileData: any) {
   if (!fileName || !fileData) return null;
