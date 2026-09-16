@@ -4273,7 +4273,6 @@ export async function performance(req: Request, res: Response) {
         monthStart,
         monthEnd,
         taskCompletion,
-        100,
         attendance,
         workingHours,
         minimumWorkHours,
