@@ -1,0 +1,21 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: withx-postgres
+    environment:
+      POSTGRES_DB: withx_management
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - withx_pgdata:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./database/seed.sql:/docker-entrypoint-initdb.d/02-seed.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d withx_management"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  withx_pgdata:

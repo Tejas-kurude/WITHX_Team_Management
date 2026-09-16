@@ -1,0 +1,2 @@
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS deductions NUMERIC(6,2) NOT NULL DEFAULT 0;

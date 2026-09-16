@@ -1,0 +1,12 @@
+BEGIN;
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS task_deduction NUMERIC(6,2) NOT NULL DEFAULT 0;
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS leave_deduction NUMERIC(6,2) NOT NULL DEFAULT 0;
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS deductions NUMERIC(6,2) NOT NULL DEFAULT 0;
+
+COMMIT;

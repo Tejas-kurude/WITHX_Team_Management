@@ -1,0 +1,11 @@
+import {useEffect,useState} from 'react';
+import {api,messageOf} from '../services/api';
+import {Empty,PageTitle} from '../components/UI';
+export default function Activity(){
+  const [rows,setRows]=useState<any[]>([]),[filters,setFilters]=useState({search:'',entity:'',from:'',to:''}),[err,setErr]=useState('');
+  async function load(){try{setErr('');const r=await api.get('/activity',{params:filters});setRows(r.data)}catch(e){setErr(messageOf(e))}}
+  useEffect(()=>{const t=setTimeout(()=>void load(),250);return()=>clearTimeout(t)},[filters.search,filters.entity,filters.from,filters.to]);
+  return <><PageTitle title="Activity Logs" subtitle="Search and filter the audit trail of important platform actions"/>
+  <div className="card mb-5 grid gap-3 p-4 md:grid-cols-4"><div className="md:col-span-2"><label className="label">Search</label><input className="input mt-1" value={filters.search} onChange={e=>setFilters({...filters,search:e.target.value})} placeholder="Name, email, employee ID, action or module..."/></div><div><label className="label">From</label><input className="input mt-1" type="date" value={filters.from} onChange={e=>setFilters({...filters,from:e.target.value})}/></div><div><label className="label">To</label><input className="input mt-1" type="date" value={filters.to} onChange={e=>setFilters({...filters,to:e.target.value})}/></div><div className="md:col-span-2"><label className="label">Entity / Module</label><input className="input mt-1" value={filters.entity} onChange={e=>setFilters({...filters,entity:e.target.value})} placeholder="TASK, ATTENDANCE, LEAVE..."/></div></div>
+  {err&&<div className="mb-4 rounded-lg bg-red-50 p-3 text-sm text-red-700">{err}</div>}
+  {rows.length?<div className="table-wrap"><table className="table"><thead><tr><th>Time</th><th>User</th><th>Employee ID</th><th>Action</th><th>Entity</th><th>ID</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}><td>{new Date(r.created_at).toLocaleString()}</td><td>{r.employee_name||r.email||'System'}<div className="text-xs muted">{r.email||''}</div></td><td>{r.employee_code||'—'}</td><td>{r.action}</td><td>{r.entity_type}</td><td>{r.entity_id||'—'}</td></tr>)}</tbody></table></div>:<Empty/>}</>}
