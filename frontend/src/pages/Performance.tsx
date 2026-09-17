@@ -12,6 +12,9 @@ export default function Performance() {
   const [msg, setMsg] = useState('');
   const [calculating, setCalculating] = useState(false);
   const [showPerformanceRules, setShowPerformanceRules] = useState(false);
+  const [attendanceRows, setAttendanceRows] = useState<any[]>([]);
+  const [attendanceLoading, setAttendanceLoading] = useState(false);
+  const [selectedAttendanceDate, setSelectedAttendanceDate] = useState<string | null>(null);
 
   const now = new Date();
 
@@ -30,6 +33,32 @@ export default function Performance() {
 
   const clampScore = (value: any) => {
     return Math.max(0, Math.min(100, safeNumber(value, 0)));
+  };
+
+  const loadAttendance = async () => {
+    try {
+      setAttendanceLoading(true);
+
+      const response = await api.get('/attendance', {
+        params: {
+          month: selectedMonth,
+          year: selectedYear,
+          employeeId: user?.role === 'EMPLOYEE' ? undefined : target || undefined,
+          _ts: Date.now(),
+        },
+      });
+
+      setAttendanceRows(
+        Array.isArray(response.data)
+          ? response.data
+          : response.data?.rows || response.data?.attendance || []
+      );
+    } catch (e) {
+      setAttendanceRows([]);
+      setMsg(messageOf(e));
+    } finally {
+      setAttendanceLoading(false);
+    }
   };
 
   const load = async () => {
@@ -51,6 +80,7 @@ export default function Performance() {
 
   useEffect(() => {
     load();
+    loadAttendance();
 
     if (user?.role !== 'EMPLOYEE') {
       api
@@ -63,7 +93,7 @@ export default function Performance() {
           setEmps([]);
         });
     }
-  }, [selectedMonth, selectedYear]);
+  }, [selectedMonth, selectedYear, target]);
 
   async function calc(employeeId?: string) {
     try {
@@ -156,6 +186,67 @@ export default function Performance() {
       setCalculating(false);
     }
   }
+
+  const monthName = new Date(selectedYear, selectedMonth - 1, 1).toLocaleString('en-IN', {
+    month: 'long',
+    year: 'numeric',
+  });
+
+  const daysInMonth = new Date(selectedYear, selectedMonth, 0).getDate();
+  const firstDayOfMonth = new Date(selectedYear, selectedMonth - 1, 1).getDay();
+
+  const calendarDays = Array.from(
+    { length: firstDayOfMonth + daysInMonth },
+    (_, index) => (index < firstDayOfMonth ? null : index - firstDayOfMonth + 1)
+  );
+
+  const getAttendanceForDate = (day: number) => {
+    const date = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    return attendanceRows.find((item) => {
+      const itemDate = item.work_date || item.date || item.attendance_date || item.created_at;
+      return String(itemDate).slice(0, 10) === date;
+    });
+  };
+
+  const attendanceStatus = (record: any) =>
+    String(record?.status || 'NO RECORD').toUpperCase();
+
+  const statusClass = (status: string) => {
+    switch (status) {
+      case 'PRESENT': return 'bg-green-100 text-green-800 border-green-300';
+      case 'ABSENT': return 'bg-red-100 text-red-800 border-red-300';
+      case 'LEAVE':
+      case 'APPROVED LEAVE': return 'bg-blue-100 text-blue-800 border-blue-300';
+      case 'HALF DAY': return 'bg-amber-100 text-amber-800 border-amber-300';
+      case 'LATE': return 'bg-purple-100 text-purple-800 border-purple-300';
+      case 'HOLIDAY': return 'bg-slate-200 text-slate-700 border-slate-300';
+      case 'WEEK OFF': return 'bg-gray-200 text-gray-700 border-gray-300';
+      default: return 'bg-white text-slate-500 border-slate-200';
+    }
+  };
+
+  const changeAttendanceMonth = (offset: number) => {
+    const nextDate = new Date(selectedYear, selectedMonth - 1 + offset, 1);
+    setSelectedMonth(nextDate.getMonth() + 1);
+    setSelectedYear(nextDate.getFullYear());
+    setSelectedAttendanceDate(null);
+  };
+
+  const attendanceSummary = attendanceRows.reduce(
+    (summary, record) => {
+      const status = attendanceStatus(record);
+      if (status === 'PRESENT') summary.present += 1;
+      if (status === 'ABSENT') summary.absent += 1;
+      if (status === 'LEAVE' || status === 'APPROVED LEAVE') summary.leave += 1;
+      if (status === 'HALF DAY') summary.halfDay += 1;
+      if (status === 'LATE') summary.late += 1;
+      summary.deduction += Number(
+        record.deduction_amount || record.deduction || record.salary_deduction || 0
+      );
+      return summary;
+    },
+    { present: 0, absent: 0, leave: 0, halfDay: 0, late: 0, deduction: 0 }
+  );
 
   const orderedRows = useMemo(() => {
     if (!target) {
@@ -400,6 +491,7 @@ export default function Performance() {
         )}
       </div>
 
+
       {orderedRows.length ? (
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
           {orderedRows.map((r) => {
@@ -587,6 +679,83 @@ const metrics = [
       ) : (
         <Empty>No performance scores calculated yet.</Empty>
       )}
+
+      <div className="card mt-12 mb-5 p-4">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-extrabold text-black">Attendance Calendar</h2>
+            <p className="text-sm text-slate-600">View daily attendance, reasons, and attendance deductions.</p>
+          </div>
+          <div className="flex items-center gap-2">
+            <button type="button" className="btn btn-secondary" onClick={() => changeAttendanceMonth(-1)}>Previous</button>
+            <span className="min-w-[160px] text-center font-bold text-black">{monthName}</span>
+            <button type="button" className="btn btn-secondary" onClick={() => changeAttendanceMonth(1)}>Next</button>
+          </div>
+        </div>
+
+        <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-6">
+          {[
+            ['Present', attendanceSummary.present, 'bg-green-100'],
+            ['Absent', attendanceSummary.absent, 'bg-red-100'],
+            ['Leave', attendanceSummary.leave, 'bg-blue-100'],
+            ['Half Day', attendanceSummary.halfDay, 'bg-amber-100'],
+            ['Late', attendanceSummary.late, 'bg-purple-100'],
+            ['Deduction', `${attendanceSummary.deduction.toFixed(2)}%`, 'bg-slate-100'],
+          ].map(([label, value, color]) => (
+            <div key={String(label)} className={`rounded-lg border border-slate-200 p-3 ${color}`}>
+              <div className="text-xs font-bold text-slate-600">{label}</div>
+              <div className="mt-1 text-xl font-extrabold text-black">{value}</div>
+            </div>
+          ))}
+        </div>
+
+        <div className="mb-4 grid grid-cols-7 gap-2 text-center text-xs font-extrabold text-slate-600">
+          {['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'].map((day) => <div key={day}>{day}</div>)}
+        </div>
+
+        {attendanceLoading ? (
+          <div className="py-8 text-center text-sm text-slate-500">Loading attendance...</div>
+        ) : (
+          <div className="grid grid-cols-7 gap-2">
+            {calendarDays.map((day, index) => {
+              if (!day) return <div key={`empty-${index}`} />;
+              const record = getAttendanceForDate(day);
+              const status = attendanceStatus(record);
+              const date = `${selectedYear}-${String(selectedMonth).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+              return (
+                <button type="button" key={date} onClick={() => setSelectedAttendanceDate(date)}
+                  className={`min-h-[76px] rounded-lg border p-2 text-left ${statusClass(status)} ${selectedAttendanceDate === date ? 'ring-2 ring-cyan-500 ring-offset-1' : ''}`}>
+                  <div className="text-sm font-extrabold">{day}</div>
+                  <div className="mt-1 break-words text-[10px] font-bold">{status}</div>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        {selectedAttendanceDate && (
+          <div className="mt-5 rounded-lg border border-slate-300 bg-slate-50 p-4">
+            <h3 className="mb-3 font-extrabold text-black">Attendance Details — {selectedAttendanceDate}</h3>
+            {(() => {
+              const selectedRecord = attendanceRows.find((item) => {
+                const itemDate = item.work_date || item.date || item.attendance_date || item.created_at;
+                return String(itemDate).slice(0, 10) === selectedAttendanceDate;
+              });
+              if (!selectedRecord) return <p className="text-sm text-slate-600">No attendance record is available for this date.</p>;
+              return (
+                <div className="grid gap-2 text-sm md:grid-cols-2">
+                  <div><b>Status:</b> {attendanceStatus(selectedRecord)}</div>
+                  <div><b>Check-in:</b> {selectedRecord.check_in || selectedRecord.login_time || '—'}</div>
+                  <div><b>Check-out:</b> {selectedRecord.check_out || selectedRecord.logout_time || '—'}</div>
+                  <div><b>Working hours:</b> {selectedRecord.worked_hours || selectedRecord.working_hours || '—'}</div>
+                  <div><b>Deduction:</b> {Number(selectedRecord.deduction_amount || selectedRecord.deduction || selectedRecord.salary_deduction || 0).toFixed(2)}%</div>
+                  <div><b>Reason:</b> {selectedRecord.reason || selectedRecord.deduction_reason || selectedRecord.notes || 'No reason provided'}</div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+      </div>
     </>
   );
 }

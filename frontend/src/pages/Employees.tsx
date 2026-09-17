@@ -461,20 +461,7 @@ export default function Employees() {
                     </option>
                   </select>
                 </div>
-
-                <div>
-                  <label className="label">
-                    Email / Login ID
-                  </label>
-
-                  <input
-                    className="input mt-1"
-                    name="email"
-                    type="email"
-                    required
-                  />
-                </div>
-
+                
                 <div>
                   <label className="label">
                     Temporary Password
@@ -514,6 +501,20 @@ export default function Employees() {
 
               </>
             )}
+
+            <div>
+              <label className="label">
+                Email / Login ID
+              </label>
+
+              <input
+                className="input mt-1"
+                name="email"
+                type="email"
+                defaultValue={editing?.email || ''}
+                required
+              />
+            </div>
 
             {editing && (
               <div>
