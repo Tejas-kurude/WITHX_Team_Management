@@ -334,6 +334,7 @@ export async function getEmployee(req: Request, res: Response) {
   if (req.user!.role === 'TEAM_LEAD' && !(await requireTeamAuthority(req, id))) return res.status(403).json({ message: 'This person is outside your team.' });
   const r = await query<any>(`SELECT e.*,d.name department_name,tl.first_name||' '||tl.last_name team_lead_name,u.role FROM employees e LEFT JOIN departments d ON d.id=e.department_id LEFT JOIN employees tl ON tl.id=e.team_lead_id LEFT JOIN users u ON u.employee_id=e.id WHERE e.id=$1`, [id]);
   if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
+  
   res.json(r.rows[0]);
 }
 export async function createEmployee(req: Request, res: Response) {
@@ -500,19 +501,21 @@ export async function updateEmployee(req: Request, res: Response) {
     `UPDATE employees
      SET first_name=COALESCE($1,first_name),
          last_name=COALESCE($2,last_name),
-         phone=$3,
-         job_title=$4,
-         department_id=$5,
-         team_lead_id=$6,
-         admin_id=$7,
-         status=COALESCE($8,status),
-         photo_url=COALESCE($9::text, photo_url),
+         email=COALESCE($3,email),
+         phone=$4,
+         job_title=$5,
+         department_id=$6,
+         team_lead_id=$7,
+         admin_id=$8,
+         status=COALESCE($9,status),
+         photo_url=COALESCE($10::text, photo_url),
          updated_at=now()
-     WHERE id=$10
+     WHERE id=$11
      RETURNING *`,
     [
       b.firstName || null,
       b.lastName || null,
+      textOrNull(b.email),
       textOrNull(b.phone),
       textOrNull(b.jobTitle),
       numOrNull(b.departmentId),
@@ -524,6 +527,30 @@ export async function updateEmployee(req: Request, res: Response) {
     ]
   );
   if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
+  // Update login role in users table
+const roleUpdate = await query<any>(
+  `UPDATE users
+   SET role = $1
+   WHERE employee_id = $2
+   RETURNING id, role`,
+  [effectiveRole, id]
+);
+
+if (!roleUpdate.rows[0]) {
+  return res.status(404).json({
+    message: 'Employee account not found.'
+  });
+}
+
+  // Keep the login email synchronized with the employee profile email.
+  if (b.email !== undefined && String(b.email).trim()) {
+    await query<any>(
+      `UPDATE users
+       SET email = $1
+       WHERE employee_id = $2`,
+      [String(b.email).trim(), id]
+    );
+  }
 
   if (b.password !== undefined && String(b.password).trim()) {
     const password = String(b.password);
@@ -538,12 +565,47 @@ export async function updateEmployee(req: Request, res: Response) {
   res.json(r.rows[0]);
 }
 export async function deleteEmployee(req: Request, res: Response) {
-  const id = Number(req.params.id);
-  if (req.user?.employeeId === id) return res.status(400).json({ message: 'You cannot delete your own Super Admin account.' });
-  const r = await query<any>('DELETE FROM employees WHERE id=$1 RETURNING id,email,employee_code', [id]);
-  if (!r.rows[0]) return res.status(404).json({ message: 'Employee not found' });
-  await audit(req.user?.userId, 'DELETE', 'EMPLOYEE', id, { email: r.rows[0].email, employeeCode: r.rows[0].employee_code });
-  res.json({ ok: true });
+  try {
+    const id = Number(req.params.id);
+
+    await query(
+      `DELETE FROM task_completion_submissions
+       WHERE submitted_by = $1`,
+      [id]
+    );
+
+    const r = await query<any>(
+      `DELETE FROM employees
+       WHERE id = $1
+       RETURNING id, email, employee_code`,
+      [id]
+    );
+
+    if (!r.rows[0]) {
+      return res.status(404).json({
+        message: 'Employee not found',
+      });
+    }
+
+    await audit(
+      req.user?.userId,
+      'DELETE',
+      'EMPLOYEE',
+      id,
+      {
+        email: r.rows[0].email,
+        employeeCode: r.rows[0].employee_code,
+      }
+    );
+
+    return res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Error deleting employee:', error);
+
+    return res.status(500).json({
+      message: error.message || 'Employee deletion failed',
+    });
+  }
 }
 
 function normalizeTaskEditValue(value: any) {
@@ -3146,8 +3208,28 @@ export async function checkOut(req: Request, res: Response) {
   res.json(r.rows[0]);
 }
 export async function listAttendance(req: Request, res: Response) {
-  const { month = '', date = '', department = '', employeeId = '', mode = '', status = '', search = '' } = req.query as any;
-  const p: any[] = []; let w = 'WHERE 1=1';
+  const {
+    month = '',
+    year = '',
+    date = '',
+    department = '',
+    employeeId = '',
+    mode = '',
+    status = '',
+    search = ''
+  } = req.query as any;
+  const p: any[] = [];
+  let w = 'WHERE 1=1';
+
+  // Support both formats:
+  //   /attendance?month=2026-09
+  //   /attendance?month=9&year=2026
+  const monthNumber = Number(month);
+  const yearNumber = Number(year);
+  const normalizedMonth =
+    yearNumber >= 2000 && monthNumber >= 1 && monthNumber <= 12
+      ? `${yearNumber}-${String(monthNumber).padStart(2, '0')}`
+      : String(month || '').trim();
 
   if (req.user!.role === 'EMPLOYEE') {
     p.push(req.user!.employeeId);
@@ -3158,7 +3240,11 @@ export async function listAttendance(req: Request, res: Response) {
     w += ` AND (a.employee_id=$${p.length} OR e.team_lead_id=$${p.length})`;
   }
 
-  if (month) { p.push(month + '-01'); w += ` AND a.work_date>=date_trunc('month',$${p.length}::date) AND a.work_date<(date_trunc('month',$${p.length}::date)+interval '1 month')`; }
+  if (/^\d{4}-\d{2}$/.test(normalizedMonth)) {
+    p.push(`${normalizedMonth}-01`);
+    w += ` AND a.work_date>=date_trunc('month',$${p.length}::date)
+           AND a.work_date<(date_trunc('month',$${p.length}::date)+interval '1 month')`;
+  }
   if (date) { p.push(date); w += ` AND a.work_date=$${p.length}::date`; }
   if (department) { p.push(Number(department)); w += ` AND e.department_id=$${p.length}`; }
   if (employeeId) { p.push(Number(employeeId)); w += ` AND e.id=$${p.length}`; }
