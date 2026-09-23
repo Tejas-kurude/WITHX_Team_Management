@@ -37,7 +37,6 @@ r.delete(
 r.get(
   '/employees',
   authenticate,
-  allowRoles('SUPER_ADMIN', 'ADMIN', 'TEAM_LEAD'),
   c.listEmployees
 );
 r.get('/employees/:id', authenticate, c.getEmployee);
@@ -226,5 +225,19 @@ r.delete(
   allowRoles('SUPER_ADMIN', 'ADMIN'),
   c.deleteWorkHours
 );
+r.delete(
+  '/work-hours/date/:id',
+  authenticate,
+  allowRoles('SUPER_ADMIN', 'ADMIN'),
+  c.deleteWorkHoursDate
+);
+
+// Internal Messaging & Chat Routes
+r.get('/messages/conversations', authenticate, c.listConversations);
+r.post('/messages/conversations', authenticate, c.createOrGetConversation);
+r.get('/messages/conversations/:id/messages', authenticate, c.getConversationMessages);
+r.post('/messages/conversations/:id/messages', authenticate, c.sendMessage);
+r.post('/messages/conversations/:id/read', authenticate, c.markConversationRead);
+r.get('/messages/users/search', authenticate, c.searchUsersForMessaging);
 
 export default r;

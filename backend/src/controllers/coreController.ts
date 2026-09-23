@@ -36,14 +36,28 @@ export async function markEndOfDayAbsences() {
          work_date,
          status,
          attendance_mode,
-         location_text
+         location_text,
+         required_work_hours
        )
        SELECT
          e.id,
          $1::date,
          'ABSENT',
          'OFFLINE',
-         'Auto-marked absent at end of day'
+         'Auto-marked absent at end of day',
+         COALESCE(
+           (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=$1::date AND dwh.scope='EMPLOYEE' AND dwh.scope_id=e.id ORDER BY dwh.id DESC LIMIT 1),
+           (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=$1::date AND dwh.scope='TEAM' AND dwh.scope_id=e.team_lead_id ORDER BY dwh.id DESC LIMIT 1),
+           (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=$1::date AND dwh.scope='DEPARTMENT' AND dwh.scope_id=e.department_id ORDER BY dwh.id DESC LIMIT 1),
+           (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=$1::date AND dwh.scope='DEFAULT' ORDER BY dwh.id DESC LIMIT 1),
+           (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+           (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+           (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+           (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+           (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+           (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'minimum_work_minutes' LIMIT 1),
+           8.00
+         )
        FROM employees e
        LEFT JOIN attendance a
          ON a.employee_id = e.id
@@ -300,7 +314,13 @@ export async function deleteDepartment(req: Request, res: Response) {
 export async function listEmployees(req: Request, res: Response) {
   const { search = '', department = '', status = '', userType = '', role = '', teamLeadId = '' } = req.query as any;
   const p: any[] = []; let where = 'WHERE 1=1';
-  if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); where += ` AND e.team_lead_id=$${p.length}`; }
+  if (req.user!.role === 'TEAM_LEAD') {
+    p.push(req.user!.employeeId);
+    where += ` AND (e.id=$${p.length} OR e.team_lead_id=$${p.length})`;
+  } else if (req.user!.role === 'EMPLOYEE') {
+    // If an employee calls listEmployees, restrict to active employees
+    where += ` AND e.status = 'ACTIVE'`;
+  }
   if (search) { p.push(`%${search}%`); where += ` AND (e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length} OR e.employee_code ILIKE $${p.length} OR e.email ILIKE $${p.length})`; }
   if (department) { p.push(Number(department)); where += ` AND e.department_id=$${p.length}`; }
   if (status) { p.push(status); where += ` AND e.status=$${p.length}`; }
@@ -3097,33 +3117,57 @@ export async function attendanceToday(req: Request, res: Response) {
 
   const r = await query<any>(`
     SELECT
-      a.*,
-      target.required_work_hours,
+      a.id,
+      COALESCE(a.employee_id, e.id) AS employee_id,
+      COALESCE(a.work_date, current_date) AS work_date,
+      a.status,
+      a.attendance_mode,
+      a.check_in,
+      a.check_out,
+      a.total_hours,
+      a.check_in_lat,
+      a.check_in_lng,
+      a.location_accuracy,
+      a.location_verified,
+      a.location_text,
+      CASE
+        WHEN a.check_in IS NOT NULL THEN COALESCE(a.required_work_hours, target.required_work_hours)
+        ELSE target.required_work_hours
+      END::numeric AS required_work_hours,
+      (CASE
+        WHEN a.check_in IS NOT NULL THEN COALESCE(a.required_work_hours, target.required_work_hours)
+        ELSE target.required_work_hours
+      END * 60.0)::numeric AS required_work_minutes,
       CASE
         WHEN a.check_in IS NULL THEN 0
         WHEN a.check_out IS NOT NULL THEN COALESCE(a.total_hours, 0)
         ELSE ROUND((EXTRACT(EPOCH FROM (now() - a.check_in))/3600)::numeric, 2)
-      END AS worked_hours
-    FROM attendance a
+      END AS worked_hours,
+      CASE
+        WHEN a.check_in IS NULL THEN 0
+        WHEN a.check_out IS NOT NULL THEN COALESCE(a.total_hours * 60, 0)
+        ELSE ROUND((EXTRACT(EPOCH FROM (now() - a.check_in))/60)::numeric, 0)
+      END AS worked_minutes
+    FROM employees e
     CROSS JOIN LATERAL (
       SELECT COALESCE(
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='EMPLOYEE' AND dwh.scope_id=e.id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='TEAM' AND dwh.scope_id=e.team_lead_id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='DEPARTMENT' AND dwh.scope_id=e.department_id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='DEFAULT' ORDER BY dwh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
-        (
-          SELECT wh.hours
-          FROM work_hours_settings wh
-          WHERE wh.scope='DEFAULT'
-            AND wh.updated_at::date = current_date
-          ORDER BY wh.updated_at DESC, wh.id DESC
-          LIMIT 1
-        ),
-        3
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+        (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'minimum_work_minutes' LIMIT 1),
+        8.00
       )::numeric AS required_work_hours
-      FROM employees e
-      WHERE e.id=a.employee_id
     ) target
-    WHERE a.employee_id=$1 AND a.work_date=current_date
+    LEFT JOIN attendance a
+      ON a.employee_id = e.id
+     AND a.work_date = current_date
+    WHERE e.id = $1
   `, [id]);
 
   res.json(r.rows[0] || null);
@@ -3147,7 +3191,8 @@ export async function checkIn(req: Request, res: Response) {
   }
   const lateTime = String(settings.late_after_time || '10:15').split(':').map(Number);
   const now = new Date(); const late = now.getHours() > lateTime[0] || (now.getHours() === lateTime[0] && now.getMinutes() > lateTime[1]);
-  const r = await query<any>(`INSERT INTO attendance(employee_id,work_date,status,attendance_mode,check_in,check_in_lat,check_in_lng,location_accuracy,location_verified,location_text) VALUES($1,current_date,$2,$3,now(),$4,$5,$6,$7,$8) ON CONFLICT(employee_id,work_date) DO UPDATE SET check_in=COALESCE(attendance.check_in,EXCLUDED.check_in),status=CASE WHEN attendance.status='LEAVE' THEN 'LEAVE' ELSE EXCLUDED.status END,attendance_mode=EXCLUDED.attendance_mode,check_in_lat=$4,check_in_lng=$5,location_accuracy=$6,location_verified=$7,location_text=$8 RETURNING *`, [emp, late ? 'LATE' : 'PRESENT', mode, mode === 'OFFLINE' ? latitude : null, mode === 'OFFLINE' ? longitude : null, mode === 'OFFLINE' ? accuracy || null : null, verified, locationText]);
+  const effectiveHours = await getEffectiveWorkHours(emp);
+  const r = await query<any>(`INSERT INTO attendance(employee_id,work_date,status,attendance_mode,check_in,check_in_lat,check_in_lng,location_accuracy,location_verified,location_text,required_work_hours) VALUES($1,current_date,$2,$3,now(),$4,$5,$6,$7,$8,$9) ON CONFLICT(employee_id,work_date) DO UPDATE SET check_in=COALESCE(attendance.check_in,EXCLUDED.check_in),status=CASE WHEN attendance.status='LEAVE' THEN 'LEAVE' ELSE EXCLUDED.status END,attendance_mode=EXCLUDED.attendance_mode,check_in_lat=$4,check_in_lng=$5,location_accuracy=$6,location_verified=$7,location_text=$8,required_work_hours=CASE WHEN attendance.check_in IS NULL THEN EXCLUDED.required_work_hours ELSE COALESCE(attendance.required_work_hours,EXCLUDED.required_work_hours) END RETURNING *`, [emp, late ? 'LATE' : 'PRESENT', mode, mode === 'OFFLINE' ? latitude : null, mode === 'OFFLINE' ? longitude : null, mode === 'OFFLINE' ? accuracy || null : null, verified, locationText, effectiveHours]);
   await audit(req.user?.userId, 'CHECK_IN', 'ATTENDANCE', r.rows[0].id, { mode, distance, locationVerified: verified });
   res.json(r.rows[0]);
 }
@@ -3263,14 +3308,22 @@ export async function listAttendance(req: Request, res: Response) {
       e.first_name||' '||e.last_name employee_name,
       u.id user_id,
       d.name department_name,
-      target.required_work_hours,
+      COALESCE(a.required_work_hours, target.required_work_hours)::numeric AS required_work_hours,
+      (COALESCE(a.required_work_hours, target.required_work_hours) * 60.0)::numeric AS required_work_minutes,
       CASE
         WHEN a.check_in IS NULL THEN 0
         WHEN a.check_out IS NOT NULL THEN COALESCE(a.total_hours, 0)
         WHEN a.work_date < current_date THEN
-          ROUND(COALESCE(target.required_work_hours, 3) / 2, 2)
+          ROUND(COALESCE(a.required_work_hours, target.required_work_hours) / 2, 2)
         ELSE ROUND((EXTRACT(EPOCH FROM (now() - a.check_in))/3600)::numeric, 2)
       END AS worked_hours,
+      CASE
+        WHEN a.check_in IS NULL THEN 0
+        WHEN a.check_out IS NOT NULL THEN COALESCE(a.total_hours * 60, 0)
+        WHEN a.work_date < current_date THEN
+          ROUND((COALESCE(a.required_work_hours, target.required_work_hours) / 2) * 60, 0)
+        ELSE ROUND((EXTRACT(EPOCH FROM (now() - a.check_in))/60)::numeric, 0)
+      END AS worked_minutes,
       (
         a.check_in IS NOT NULL
         AND a.check_out IS NULL
@@ -3289,18 +3342,17 @@ export async function listAttendance(req: Request, res: Response) {
     LEFT JOIN departments d ON d.id=e.department_id
     CROSS JOIN LATERAL (
       SELECT COALESCE(
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=a.work_date AND dwh.scope='EMPLOYEE' AND dwh.scope_id=e.id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=a.work_date AND dwh.scope='TEAM' AND dwh.scope_id=e.team_lead_id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=a.work_date AND dwh.scope='DEPARTMENT' AND dwh.scope_id=e.department_id ORDER BY dwh.id DESC LIMIT 1),
+        (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=a.work_date AND dwh.scope='DEFAULT' ORDER BY dwh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
         (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
-        (
-          SELECT wh.hours
-          FROM work_hours_settings wh
-          WHERE wh.scope='DEFAULT'
-            AND wh.updated_at::date = current_date
-          ORDER BY wh.updated_at DESC, wh.id DESC
-          LIMIT 1
-        ),
-        3
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+        (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'minimum_work_minutes' LIMIT 1),
+        8.00
       )::numeric AS required_work_hours
     ) target
     ${w}
@@ -3573,38 +3625,80 @@ export async function deleteLeave(req: Request, res: Response) { const id = Numb
 async function getEffectiveWorkHours(employeeId: number) {
   const r = await query<any>(`
     SELECT COALESCE(
+      (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='EMPLOYEE' AND dwh.scope_id=e.id ORDER BY dwh.id DESC LIMIT 1),
+      (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='TEAM' AND dwh.scope_id=e.team_lead_id ORDER BY dwh.id DESC LIMIT 1),
+      (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='DEPARTMENT' AND dwh.scope_id=e.department_id ORDER BY dwh.id DESC LIMIT 1),
+      (SELECT dwh.hours FROM work_hours_date_overrides dwh WHERE dwh.effective_date=current_date AND dwh.scope='DEFAULT' ORDER BY dwh.id DESC LIMIT 1),
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
       (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
-      (
-        SELECT wh.hours
-        FROM work_hours_settings wh
-        WHERE wh.scope='DEFAULT'
-          AND wh.updated_at::date = current_date
-        ORDER BY wh.updated_at DESC, wh.id DESC
-        LIMIT 1
-      ),
-      3
+      (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+      (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+      (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'minimum_work_minutes' LIMIT 1),
+      8.00
     )::numeric AS hours
     FROM employees e
     WHERE e.id=$1
   `, [employeeId]);
   const hours = Number(r.rows[0]?.hours);
-  return Number.isFinite(hours) && hours > 0 ? hours : 3;
+  return Number.isFinite(hours) && hours > 0 ? hours : 8;
 }
 
 async function getEffectiveWorkHoursForDate(
   employeeId: number,
-  dateText: string
+  dateText: string,
+  fallbackMinutes = 480
 ) {
   const r = await query<any>(`
     SELECT COALESCE(
+      (
+        SELECT a.required_work_hours
+        FROM attendance a
+        WHERE a.employee_id=e.id
+          AND a.work_date=$2::date
+          AND a.required_work_hours IS NOT NULL
+        LIMIT 1
+      ),
+      (
+        SELECT dwh.hours
+        FROM work_hours_date_overrides dwh
+        WHERE dwh.effective_date=$2::date
+          AND dwh.scope='EMPLOYEE'
+          AND dwh.scope_id=e.id
+        ORDER BY dwh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT dwh.hours
+        FROM work_hours_date_overrides dwh
+        WHERE dwh.effective_date=$2::date
+          AND dwh.scope='TEAM'
+          AND dwh.scope_id=e.team_lead_id
+        ORDER BY dwh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT dwh.hours
+        FROM work_hours_date_overrides dwh
+        WHERE dwh.effective_date=$2::date
+          AND dwh.scope='DEPARTMENT'
+          AND dwh.scope_id=e.department_id
+        ORDER BY dwh.id DESC
+        LIMIT 1
+      ),
+      (
+        SELECT dwh.hours
+        FROM work_hours_date_overrides dwh
+        WHERE dwh.effective_date=$2::date
+          AND dwh.scope='DEFAULT'
+        ORDER BY dwh.id DESC
+        LIMIT 1
+      ),
       (
         SELECT wh.hours
         FROM work_hours_settings wh
         WHERE wh.scope='EMPLOYEE'
           AND wh.scope_id=e.id
-          AND wh.updated_at::date <= $2::date
         ORDER BY wh.updated_at DESC, wh.id DESC
         LIMIT 1
       ),
@@ -3613,7 +3707,6 @@ async function getEffectiveWorkHoursForDate(
         FROM work_hours_settings wh
         WHERE wh.scope='TEAM'
           AND wh.scope_id=e.team_lead_id
-          AND wh.updated_at::date <= $2::date
         ORDER BY wh.updated_at DESC, wh.id DESC
         LIMIT 1
       ),
@@ -3622,7 +3715,6 @@ async function getEffectiveWorkHoursForDate(
         FROM work_hours_settings wh
         WHERE wh.scope='DEPARTMENT'
           AND wh.scope_id=e.department_id
-          AND wh.updated_at::date <= $2::date
         ORDER BY wh.updated_at DESC, wh.id DESC
         LIMIT 1
       ),
@@ -3630,73 +3722,495 @@ async function getEffectiveWorkHoursForDate(
         SELECT wh.hours
         FROM work_hours_settings wh
         WHERE wh.scope='DEFAULT'
-          AND wh.updated_at::date <= $2::date
         ORDER BY wh.updated_at DESC, wh.id DESC
         LIMIT 1
       ),
-      3
+      (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+      (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'minimum_work_minutes' LIMIT 1),
+      ($3::numeric / 60.0)
     )::numeric AS hours
     FROM employees e
     WHERE e.id=$1
-  `, [employeeId, dateText]);
+  `, [employeeId, dateText, fallbackMinutes]);
 
   const hours = Number(r.rows[0]?.hours);
-  return Number.isFinite(hours) && hours > 0 ? hours : 3;
+  return Number.isFinite(hours) && hours > 0
+    ? hours
+    : fallbackMinutes / 60;
+}
+
+async function getPerformanceConfig() {
+  const [sRes, whRes] = await Promise.all([
+    query<any>(`
+      SELECT key, value
+      FROM system_settings
+      WHERE key IN (
+        'performance_total_working_days',
+        'performance_default_daily_required_minutes',
+        'performance_task_deadline_days',
+        'performance_task_late_deduction_per_day',
+        'minimum_work_minutes'
+      )
+    `),
+    query<any>(`
+      SELECT hours
+      FROM work_hours_settings
+      WHERE scope='DEFAULT'
+      ORDER BY updated_at DESC, id DESC
+      LIMIT 1
+    `)
+  ]);
+
+  const settings = Object.fromEntries(
+    sRes.rows.map((row: any) => [row.key, row.value])
+  );
+
+  const numberOrDefault = (value: any, fallback: number) => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+
+  const defaultHours = Number(whRes.rows[0]?.hours);
+  const defaultDailyRequiredMinutes =
+    Number.isFinite(defaultHours) && defaultHours > 0
+      ? defaultHours * 60
+      : numberOrDefault(
+          settings.performance_default_daily_required_minutes,
+          numberOrDefault(settings.minimum_work_minutes, 480)
+        );
+
+  return {
+    totalWorkingDays: Math.max(
+      1,
+      Math.round(
+        numberOrDefault(
+          settings.performance_total_working_days,
+          26
+        )
+      )
+    ),
+    defaultDailyRequiredMinutes,
+    taskDeadlineDays: Math.max(
+      0,
+      Math.floor(
+        numberOrDefault(
+          settings.performance_task_deadline_days,
+          5
+        )
+      )
+    ),
+    taskLateDeductionPerDay: Math.min(
+      100,
+      Math.max(
+        0,
+        numberOrDefault(
+          settings.performance_task_late_deduction_per_day,
+          20
+        )
+      )
+    )
+  };
 }
 
 export async function listWorkHours(req: Request, res: Response) {
   if (req.user!.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({ message: 'Only Super Admin can access work-hours settings.' });
+    return res.status(403).json({
+      message: 'Only Super Admin can access work-hours settings.'
+    });
   }
-  const r = await query<any>(`
+const r = await query<any>(`
+  SELECT
+    x.id,
+    x.scope,
+    x.scope_id,
+    x.hours,
+    x.created_by,
+    x.created_at,
+    x.updated_at,
+    x.setting_type,
+    x.effective_date,
+    x.target_name,
+    x.current_hours
+  FROM (
     SELECT
-      wh.*,
-      CASE
-        WHEN wh.scope='DEFAULT' AND wh.updated_at::date < current_date THEN 3
-        ELSE wh.hours
-      END AS current_hours,
+      wh.id,
+      wh.scope,
+      wh.scope_id,
+      wh.hours,
+      wh.created_by,
+      wh.created_at,
+      wh.updated_at,
+      'GENERAL'::text AS setting_type,
+      NULL::date AS effective_date,
       CASE
         WHEN wh.scope='DEFAULT' THEN 'Default'
         WHEN wh.scope='DEPARTMENT' THEN COALESCE(d.name,'Department')
-        WHEN wh.scope='TEAM' THEN COALESCE(tl.first_name||' '||tl.last_name,'Team')
-        WHEN wh.scope='EMPLOYEE' THEN COALESCE(e.first_name||' '||e.last_name,'Employee')
+        WHEN wh.scope='TEAM' THEN COALESCE(tl.first_name || ' ' || tl.last_name,'Team')
+        WHEN wh.scope='EMPLOYEE' THEN COALESCE(e.first_name || ' ' || e.last_name,'Employee')
         ELSE wh.scope
-      END AS target_name
+      END AS target_name,
+      wh.hours AS current_hours,
+
+      1 AS setting_type_sort,
+
+      CASE wh.scope
+        WHEN 'DEFAULT' THEN 1
+        WHEN 'DEPARTMENT' THEN 2
+        WHEN 'TEAM' THEN 3
+        WHEN 'EMPLOYEE' THEN 4
+        ELSE 5
+      END AS scope_sort
+
     FROM work_hours_settings wh
-    LEFT JOIN departments d ON wh.scope='DEPARTMENT' AND d.id=wh.scope_id
-    LEFT JOIN employees tl ON wh.scope='TEAM' AND tl.id=wh.scope_id
-    LEFT JOIN employees e ON wh.scope='EMPLOYEE' AND e.id=wh.scope_id
-    ORDER BY CASE wh.scope WHEN 'DEFAULT' THEN 1 WHEN 'DEPARTMENT' THEN 2 WHEN 'TEAM' THEN 3 WHEN 'EMPLOYEE' THEN 4 ELSE 5 END, target_name
-  `);
+
+    LEFT JOIN departments d
+      ON wh.scope='DEPARTMENT'
+      AND d.id=wh.scope_id
+
+    LEFT JOIN employees tl
+      ON wh.scope='TEAM'
+      AND tl.id=wh.scope_id
+
+    LEFT JOIN employees e
+      ON wh.scope='EMPLOYEE'
+      AND e.id=wh.scope_id
+
+    UNION ALL
+
+    SELECT
+      dwh.id,
+      dwh.scope,
+      dwh.scope_id,
+      dwh.hours,
+      dwh.created_by,
+      dwh.created_at,
+      dwh.updated_at,
+      'DATE'::text AS setting_type,
+      dwh.effective_date,
+
+      CASE
+        WHEN dwh.scope='DEFAULT' THEN 'Default'
+        WHEN dwh.scope='DEPARTMENT' THEN COALESCE(d.name,'Department')
+        WHEN dwh.scope='TEAM' THEN COALESCE(tl.first_name || ' ' || tl.last_name,'Team')
+        WHEN dwh.scope='EMPLOYEE' THEN COALESCE(e.first_name || ' ' || e.last_name,'Employee')
+        ELSE dwh.scope
+      END AS target_name,
+
+      dwh.hours AS current_hours,
+
+      2 AS setting_type_sort,
+
+      CASE dwh.scope
+        WHEN 'DEFAULT' THEN 1
+        WHEN 'DEPARTMENT' THEN 2
+        WHEN 'TEAM' THEN 3
+        WHEN 'EMPLOYEE' THEN 4
+        ELSE 5
+      END AS scope_sort
+
+    FROM work_hours_date_overrides dwh
+
+    LEFT JOIN departments d
+      ON dwh.scope='DEPARTMENT'
+      AND d.id=dwh.scope_id
+
+    LEFT JOIN employees tl
+      ON dwh.scope='TEAM'
+      AND tl.id=dwh.scope_id
+
+    LEFT JOIN employees e
+      ON dwh.scope='EMPLOYEE'
+      AND e.id=dwh.scope_id
+  ) x
+
+  ORDER BY
+    x.setting_type_sort,
+    x.scope_sort,
+    x.effective_date NULLS FIRST,
+    x.target_name
+`);
+
   res.json(r.rows);
 }
-
 export async function saveWorkHours(req: Request, res: Response) {
   if (req.user!.role !== 'SUPER_ADMIN') {
-    return res.status(403).json({ message: 'Only Super Admin can modify work-hours settings.' });
+    return res.status(403).json({
+      message: 'Only Super Admin can modify work-hours settings.'
+    });
   }
-  const scope=String(req.body.scope||'').toUpperCase();
-  const scopeId=req.body.scopeId===''||req.body.scopeId===null||req.body.scopeId===undefined?null:Number(req.body.scopeId);
-  const hours=Number(req.body.hours);
-  if(!['DEFAULT','DEPARTMENT','TEAM','EMPLOYEE'].includes(scope)) return res.status(400).json({message:'Invalid work-hours scope.'});
-  if(scope!=='DEFAULT' && (scopeId === null || !Number.isInteger(scopeId) || scopeId <= 0)) return res.status(400).json({message:'A valid target is required.'});
-  if(!Number.isFinite(hours)||hours<=0||hours>24) return res.status(400).json({message:'Work hours must be greater than 0 and no more than 24 hours.'});
 
-  // Non-default scopes have already been validated above, so narrow the
-  // nullable value for the database calls that require a numeric target.
+  const scope = String(
+    req.body.scope || ''
+  ).toUpperCase();
+
+  const scopeId =
+    req.body.scopeId === '' ||
+    req.body.scopeId === null ||
+    req.body.scopeId === undefined
+      ? null
+      : Number(req.body.scopeId);
+
+  const hours =
+    Number(req.body.hours);
+
+  const effectiveDate =
+    req.body.effectiveDate === '' ||
+    req.body.effectiveDate === null ||
+    req.body.effectiveDate === undefined
+      ? null
+      : String(req.body.effectiveDate).trim();
+
+  if (!['DEFAULT','DEPARTMENT','TEAM','EMPLOYEE'].includes(scope)) {
+    return res.status(400).json({
+      message: 'Invalid work-hours scope.'
+    });
+  }
+
+  if (
+    scope !== 'DEFAULT' &&
+    (
+      scopeId === null ||
+      !Number.isInteger(scopeId) ||
+      scopeId <= 0
+    )
+  ) {
+    return res.status(400).json({
+      message: 'A valid target is required.'
+    });
+  }
+
+  if (
+    !Number.isFinite(hours) ||
+    hours <= 0 ||
+    hours > 24
+  ) {
+    return res.status(400).json({
+      message:
+        'Work hours must be greater than 0 and no more than 24 hours.'
+    });
+  }
+
+  if (
+    effectiveDate &&
+    !/^\d{4}-\d{2}-\d{2}$/.test(effectiveDate)
+  ) {
+    return res.status(400).json({
+      message:
+        'Please provide a valid date in YYYY-MM-DD format.'
+    });
+  }
+
   const targetId = scopeId as number;
 
-  if(scope==='DEPARTMENT') { const x=await query<any>('SELECT 1 FROM departments WHERE id=$1',[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Department not found.'}); }
-  if(scope==='TEAM') { const x=await query<any>(`SELECT 1 FROM employees WHERE id=$1 AND EXISTS (SELECT 1 FROM users u WHERE u.employee_id=employees.id AND u.role='TEAM_LEAD')`,[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Team lead not found.'}); }
-  if(scope==='EMPLOYEE') { const x=await query<any>('SELECT 1 FROM employees WHERE id=$1',[targetId]); if(!x.rows[0]) return res.status(404).json({message:'Employee not found.'}); }
-  if(scope==='DEFAULT') {
-    const r=await query<any>(`UPDATE work_hours_settings SET hours=$1,updated_at=now(),created_by=COALESCE(created_by,$2) WHERE scope='DEFAULT' RETURNING *`,[hours,req.user!.employeeId]);
-    if(r.rows[0]) { await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0].id,{scope,hours}); return res.json(r.rows[0]); }
-    const r2=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES('DEFAULT',NULL,$1,$2) RETURNING *`,[hours,req.user!.employeeId]);
-    await audit(req.user?.userId,'CREATE','WORK_HOURS',r2.rows[0].id,{scope,hours}); return res.status(201).json(r2.rows[0]);
+  if (scope === 'DEPARTMENT') {
+    const x = await query<any>(
+      'SELECT 1 FROM departments WHERE id=$1',
+      [targetId]
+    );
+
+    if (!x.rows[0]) {
+      return res.status(404).json({
+        message: 'Department not found.'
+      });
+    }
   }
-  const r=await query<any>(`INSERT INTO work_hours_settings(scope,scope_id,hours,created_by) VALUES($1,$2,$3,$4) ON CONFLICT (scope,scope_id) WHERE scope <> 'DEFAULT' DO UPDATE SET hours=EXCLUDED.hours,updated_at=now() RETURNING *`,[scope,targetId,hours,req.user!.employeeId]);
-  await audit(req.user?.userId,'UPDATE','WORK_HOURS',r.rows[0]?.id||null,{scope,scopeId:targetId,hours});
+
+  if (scope === 'TEAM') {
+    const x = await query<any>(
+      `SELECT 1
+       FROM employees
+       WHERE id=$1
+         AND EXISTS (
+           SELECT 1
+           FROM users u
+           WHERE u.employee_id=employees.id
+             AND u.role='TEAM_LEAD'
+         )`,
+      [targetId]
+    );
+
+    if (!x.rows[0]) {
+      return res.status(404).json({
+        message: 'Team lead not found.'
+      });
+    }
+  }
+
+  if (scope === 'EMPLOYEE') {
+    const x = await query<any>(
+      'SELECT 1 FROM employees WHERE id=$1',
+      [targetId]
+    );
+
+    if (!x.rows[0]) {
+      return res.status(404).json({
+        message: 'Employee not found.'
+      });
+    }
+  }
+
+  if (effectiveDate) {
+    if (scope === 'DEFAULT') {
+      const r = await query<any>(
+        `INSERT INTO work_hours_date_overrides(
+           effective_date,
+           scope,
+           scope_id,
+           hours,
+           created_by
+         )
+         VALUES($1::date,'DEFAULT',NULL,$2,$3)
+         ON CONFLICT (effective_date,scope)
+         WHERE scope='DEFAULT'
+         DO UPDATE SET
+           hours=EXCLUDED.hours,
+           updated_at=now()
+         RETURNING *`,
+        [
+          effectiveDate,
+          hours,
+          req.user!.employeeId
+        ]
+      );
+
+      await audit(
+        req.user?.userId,
+        'UPDATE',
+        'WORK_HOURS',
+        r.rows[0]?.id || null,
+        {
+          scope,
+          hours,
+          effectiveDate
+        }
+      );
+
+      return res.json(r.rows[0]);
+    }
+
+    const r = await query<any>(
+      `INSERT INTO work_hours_date_overrides(
+         effective_date,
+         scope,
+         scope_id,
+         hours,
+         created_by
+       )
+       VALUES($1::date,$2,$3,$4,$5)
+       ON CONFLICT (effective_date,scope,scope_id)
+       DO UPDATE SET
+         hours=EXCLUDED.hours,
+         updated_at=now()
+       RETURNING *`,
+      [
+        effectiveDate,
+        scope,
+        targetId,
+        hours,
+        req.user!.employeeId
+      ]
+    );
+
+    await audit(
+      req.user?.userId,
+      'UPDATE',
+      'WORK_HOURS',
+      r.rows[0]?.id || null,
+      {
+        scope,
+        scopeId: targetId,
+        hours,
+        effectiveDate
+      }
+    );
+
+    return res.json(r.rows[0]);
+  }
+
+  if (scope === 'DEFAULT') {
+    await query(`
+      INSERT INTO system_settings(key, value)
+      VALUES
+        ('performance_default_daily_required_minutes', ($1 * 60.0)::text),
+        ('minimum_work_minutes', ($1 * 60.0)::text)
+      ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value
+    `, [hours]);
+
+    const r = await query<any>(
+      `UPDATE work_hours_settings
+       SET hours=$1,
+           updated_at=now(),
+           created_by=COALESCE(created_by,$2)
+       WHERE scope='DEFAULT'
+       RETURNING *`,
+      [hours, req.user!.employeeId]
+    );
+
+    if (r.rows[0]) {
+      await audit(
+        req.user?.userId,
+        'UPDATE',
+        'WORK_HOURS',
+        r.rows[0].id,
+        { scope, hours }
+      );
+      return res.json(r.rows[0]);
+    }
+
+    const r2 = await query<any>(
+      `INSERT INTO work_hours_settings(
+         scope,scope_id,hours,created_by
+       )
+       VALUES('DEFAULT',NULL,$1,$2)
+       RETURNING *`,
+      [
+        hours,
+        req.user!.employeeId
+      ]
+    );
+
+    await audit(
+      req.user?.userId,
+      'CREATE',
+      'WORK_HOURS',
+      r2.rows[0].id,
+      { scope, hours }
+    );
+
+    return res.status(201).json(r2.rows[0]);
+  }
+
+  const r = await query<any>(
+    `INSERT INTO work_hours_settings(
+       scope,scope_id,hours,created_by
+     )
+     VALUES($1,$2,$3,$4)
+     ON CONFLICT (scope,scope_id)
+     WHERE scope <> 'DEFAULT'
+     DO UPDATE SET
+       hours=EXCLUDED.hours,
+       updated_at=now()
+     RETURNING *`,
+    [
+      scope,
+      targetId,
+      hours,
+      req.user!.employeeId
+    ]
+  );
+
+  await audit(
+    req.user?.userId,
+    'UPDATE',
+    'WORK_HOURS',
+    r.rows[0]?.id || null,
+    {
+      scope,
+      scopeId: targetId,
+      hours
+    }
+  );
+
   res.json(r.rows[0]);
 }
 
@@ -3888,17 +4402,18 @@ export async function performance(req: Request, res: Response) {
       req.user!.role === 'TEAM_LEAD' &&
       !(await requireTeamAuthority(req, requestedEmployeeId))
     ) {
-      return res
-        .status(403)
-        .json({ message: 'This employee is outside your team.' });
+      return res.status(403).json({
+        message: 'This employee is outside your team.'
+      });
     }
     targets = [requestedEmployeeId];
   } else if (req.user!.role === 'TEAM_LEAD') {
     const team = await query<any>(
       `SELECT id
        FROM employees
-       WHERE team_lead_id=$1
-         AND status <> 'INACTIVE'`,
+       WHERE (id=$1 OR team_lead_id=$1)
+         AND status <> 'INACTIVE'
+       ORDER BY id`,
       [req.user!.employeeId]
     );
     targets = team.rows.map((row: any) => Number(row.id));
@@ -3906,15 +4421,17 @@ export async function performance(req: Request, res: Response) {
     const employees = await query<any>(
       `SELECT id
        FROM employees
-       WHERE status <> 'INACTIVE'`
+       WHERE status <> 'INACTIVE'
+       ORDER BY id`
     );
     targets = employees.rows.map((row: any) => Number(row.id));
   }
 
   targets = targets.filter(Number.isFinite);
+
   if (!targets.length) {
     return res.status(400).json({
-      message: 'No employees available for performance calculation.',
+      message: 'No employees available for performance calculation.'
     });
   }
 
@@ -3923,80 +4440,109 @@ export async function performance(req: Request, res: Response) {
     return Number.isFinite(n) ? n : fallback;
   };
 
-  const clampPercent = (value: any, fallback = 0) =>
-    Math.max(0, Math.min(100, safeNumber(value, fallback)));
+  const clampPercent = (value: any) =>
+    Math.max(0, Math.min(100, safeNumber(value, 0)));
 
-  const calculateAverage = (values: number[], fallback = 100) => {
-    if (!values.length) return fallback;
-    return values.reduce((sum, value) => sum + value, 0) / values.length;
-  };
+  const config = await getPerformanceConfig();
 
   const dateResult = await query<any>(
     'SELECT current_date::text AS current_date'
   );
 
-  // dateOnlyValue() intentionally returns a YYYY-MM-DD string because the
-  // performance calculation compares and iterates dates as strings.
-  // Use a separate Date object only for month/year extraction.
   const systemCurrentDate = dateOnlyValue(
     dateResult.rows[0]?.current_date || new Date()
   );
 
-  const systemCurrentDateObj = new Date(
+  const currentDateObj = new Date(
     `${systemCurrentDate}T00:00:00Z`
   );
 
   const calculationMonth =
     requestedMonth >= 1 && requestedMonth <= 12
       ? requestedMonth
-      : systemCurrentDateObj.getUTCMonth() + 1;
+      : currentDateObj.getUTCMonth() + 1;
 
   const calculationYear =
     requestedYear >= 2000 && requestedYear <= 2100
       ? requestedYear
-      : systemCurrentDateObj.getUTCFullYear();
+      : currentDateObj.getUTCFullYear();
 
-  const monthStart = `${calculationYear}-${String(calculationMonth).padStart(2, '0')}-01`;
+  const monthStart =
+    `${calculationYear}-${String(calculationMonth).padStart(2, '0')}-01`;
+
   const monthEnd = dateOnlyValue(
     new Date(Date.UTC(calculationYear, calculationMonth, 0))
   );
 
-  // For the current month, calculate only up to today for attendance/tasks.
-  // The stored period still represents the complete calendar month.
   const isCurrentMonth =
-    calculationYear === systemCurrentDateObj.getUTCFullYear() &&
-    calculationMonth === systemCurrentDateObj.getUTCMonth() + 1;
+    calculationYear === currentDateObj.getUTCFullYear() &&
+    calculationMonth === currentDateObj.getUTCMonth() + 1;
 
-  const calculationEnd = isCurrentMonth
-    ? systemCurrentDate
-    : monthEnd;
+  const calculationEnd =
+    isCurrentMonth
+      ? systemCurrentDate
+      : monthEnd;
 
   const calculated: any[] = [];
 
   for (const target of targets) {
     const employeeMeta = await query<any>(
-      `SELECT joining_date::text AS joining_date
-       FROM employees
-       WHERE id=$1`,
+      `SELECT
+         joining_date::text AS joining_date,
+         to_jsonb(e) AS employee_data
+       FROM employees e
+       WHERE e.id=$1`,
       [target]
     );
 
-    const joiningDate = employeeMeta.rows[0]?.joining_date
-      ? dateOnlyValue(employeeMeta.rows[0].joining_date)
-      : null;
+    const joiningDate =
+      employeeMeta.rows[0]?.joining_date
+        ? dateOnlyValue(
+            employeeMeta.rows[0].joining_date
+          )
+        : null;
 
-    const minimumWorkHours = await getEffectiveWorkHours(target);
-    const normalDayHours = safeNumber(minimumWorkHours, 3);
-    const saturdayHours = normalDayHours * 2;
-    const dailyDeduction = 100 / 26;
-
-    // Never calculate a score for dates before the employee joined.
     const periodStart =
       joiningDate && joiningDate > monthStart
         ? joiningDate
         : monthStart;
 
-    const [attendanceResult, leaveResult, taskResult] = await Promise.all([
+    const employeeData =
+      employeeMeta.rows[0]?.employee_data || {};
+
+    const payCandidates = [
+      ['salary', 'Salary'],
+      ['salary_amount', 'Salary'],
+      ['monthly_salary', 'Salary'],
+      ['base_salary', 'Salary'],
+      ['stipend', 'Stipend'],
+      ['stipend_amount', 'Stipend'],
+      ['base_pay', 'Base Pay'],
+      ['compensation_amount', 'Base Pay']
+    ];
+
+    let basePay: number | null = null;
+    let basePayLabel = 'Salary / Stipend';
+
+    for (const [key, label] of payCandidates) {
+      const value = Number(employeeData?.[key]);
+
+      if (
+        Number.isFinite(value) &&
+        value >= 0
+      ) {
+        basePay = value;
+        basePayLabel = String(label);
+        break;
+      }
+    }
+
+    const [
+      attendanceResult,
+      leaveResult,
+      taskResult,
+      dailyResult
+    ] = await Promise.all([
       query<any>(
         `SELECT
            work_date::text AS work_date,
@@ -4005,22 +4551,17 @@ export async function performance(req: Request, res: Response) {
            check_out,
            CASE
              WHEN check_in IS NULL THEN 0
-             WHEN check_out IS NOT NULL THEN COALESCE(total_hours, 0)
-             ELSE ROUND(
-               (EXTRACT(EPOCH FROM (now() - check_in))/3600)::numeric,
-               2
-             )
-           END AS worked_hours,
-         
-           (
-
-             check_in IS NOT NULL
-
-             AND check_out IS NULL
-
-             AND work_date < current_date
-
-           ) AS checkout_missed
+             WHEN check_out IS NOT NULL THEN
+               GREATEST(
+                 EXTRACT(EPOCH FROM (check_out - check_in)) / 60.0,
+                 0
+               )
+             ELSE
+               GREATEST(
+                 EXTRACT(EPOCH FROM (now() - check_in)) / 60.0,
+                 0
+               )
+           END AS worked_minutes
          FROM attendance
          WHERE employee_id=$1
            AND work_date BETWEEN $2::date AND $3::date
@@ -4038,66 +4579,131 @@ export async function performance(req: Request, res: Response) {
            AND end_date >= $2::date
            AND start_date <= $3::date
          ORDER BY start_date`,
-        [target, periodStart, monthEnd]
+        [target, periodStart, calculationEnd]
       ),
       query<any>(
         `SELECT
            id,
+           title,
+           task_type,
            start_date::text AS start_date,
-           due_date,
-           status,
-           completed_at
+           due_date::text AS due_date,
+           created_at::text AS created_at,
+           completed_at,
+           status
          FROM tasks
          WHERE assigned_to=$1
-           AND created_at::date BETWEEN $2::date AND $3::date
            AND status NOT IN ('CANCELLED','DRAFT')
-         ORDER BY created_at ASC, id ASC`,
+           AND COALESCE(start_date, created_at::date) <= $3::date
+           AND (
+             due_date IS NULL
+             OR due_date::date >= $2::date
+           )
+         ORDER BY
+           COALESCE(start_date::date, created_at::date) ASC,
+           COALESCE(due_date::date, '9999-12-31'::date) ASC,
+           created_at ASC,
+           id ASC`,
         [target, periodStart, calculationEnd]
       ),
+      query<any>(
+        `SELECT
+           work_date::text AS work_date,
+           required_minutes,
+           worked_minutes,
+           missing_minutes,
+           attendance_percentage,
+           deduction_percentage
+         FROM performance_attendance_daily
+         WHERE employee_id=$1
+           AND work_date BETWEEN $2::date AND $3::date
+         ORDER BY work_date`,
+        [target, periodStart, calculationEnd]
+      )
     ]);
 
     const attendanceByDate = new Map<string, any>();
+
     for (const row of attendanceResult.rows) {
-      const rowDate = dateOnlyValue(row.work_date);
+      const date = dateOnlyValue(row.work_date);
 
-      // A checked-in day from the past with no checkout is a half day.
-      // Treat its working hours as exactly 50% of that day's requirement.
-      if (row.checkout_missed) {
-        const requiredForDate = isSaturday(rowDate)
-          ? saturdayHours
-          : normalDayHours;
-        row.worked_hours = Number((requiredForDate / 2).toFixed(2));
-      }
-
-      attendanceByDate.set(rowDate, row);
+      attendanceByDate.set(date, {
+        ...row,
+        worked_minutes: Math.max(
+          0,
+          safeNumber(row.worked_minutes, 0)
+        )
+      });
     }
 
-    const neutralLeaves = leaveResult.rows
-      .filter((row: any) =>
-        ['PAID', 'SICK'].includes(String(row.leave_type).toUpperCase())
-      )
-      .map((row: any) => ({
-        start_date: row.start_date,
-        end_date: row.end_date,
-      }));
+    /*
+     * Required minutes are snapshotted per date.
+     * A later work-hours change therefore cannot rewrite an
+     * existing daily performance baseline.
+     */
+    const requiredMinutesByDate = new Map<string, number>();
 
-    const unpaidLeaves = leaveResult.rows
-      .filter(
-        (row: any) =>
-          String(row.leave_type).toUpperCase() === 'UNPAID'
-      )
-      .map((row: any) => ({
-        start_date: row.start_date,
-        end_date: row.end_date,
-      }));
+    for (const row of dailyResult.rows) {
+      requiredMinutesByDate.set(
+        dateOnlyValue(row.work_date),
+        Math.max(
+          0,
+          safeNumber(
+            row.required_minutes,
+            config.defaultDailyRequiredMinutes
+          )
+        )
+      );
+    }
+
+    const attendanceDaily: any[] = [];
+
+    const approvedLeaveForDate = (date: string) =>
+      leaveResult.rows.find((leave: any) => {
+        const start = dateOnlyValue(leave.start_date);
+        const end = dateOnlyValue(leave.end_date);
+        return start <= date && end >= date;
+      });
 
     /*
-     * ATTENDANCE METRIC
-     * Attendance shortfall is shown as its own metric.
-     * It does not create the Task or Leave deduction buckets.
+     * Attendance deduction is intentionally based ONLY on:
+     *   1. an attendance row explicitly marked ABSENT, or
+     *   2. an APPROVED UNPAID leave day.
+     *
+     * PRESENT/LATE/HALF-DAY records do not create an attendance
+     * deduction here. APPROVED paid/other leave is neutral and creates
+     * no deduction. The day remains part of the configured 26-day pool.
+     *
+     * The deduction is still minute-based: a qualifying missed day
+     * contributes that day's required minutes divided by the total
+     * required minutes for the configured working-day pool.
      */
-    const attendanceScores: number[] = [];
-    const workingDaysSeen: string[] = [];
+    /*
+     * The attendance deduction pool is always based on the configured
+     * working-day pool. With the default 26 working days and 180 minutes
+     * per day, one full qualifying day is:
+     *
+     *   180 / (26 * 180) * 100 = 3.846153...%
+     *
+     * Do NOT rebuild this denominator from the number of dates that have
+     * elapsed in the selected month. Otherwise one leave/absence can
+     * incorrectly become a much larger percentage such as 7.82%.
+     *
+     * Date-specific required-minute overrides are still respected for the
+     * missed-minute amount, but the configured working-day pool remains the
+     * attendance deduction baseline.
+     */
+    const totalRequiredMinutes =
+      Math.max(
+        0,
+        config.totalWorkingDays *
+          config.defaultDailyRequiredMinutes
+      );
+
+    let qualifyingMissingMinutes = 0;
+    let totalWorkedMinutes = 0;
+
+    const resolvedAttendanceDays: any[] = [];
 
     for (
       let cursor = periodStart;
@@ -4105,103 +4711,171 @@ export async function performance(req: Request, res: Response) {
       cursor = shiftDate(cursor, 1)
     ) {
       if (isSunday(cursor)) continue;
-      if (isWithinLeave(cursor, neutralLeaves)) continue;
 
-      // Approved UNPAID leave is handled only by leaveDeduction below.
-      if (isWithinLeave(cursor, unpaidLeaves)) continue;
+      let requiredMinutes =
+        requiredMinutesByDate.get(cursor);
 
-      workingDaysSeen.push(cursor);
-
-      const requiredHours = isSaturday(cursor)
-        ? saturdayHours
-        : normalDayHours;
+      if (requiredMinutes === undefined) {
+        requiredMinutes = Math.max(
+          0,
+          safeNumber(
+            (
+              await getEffectiveWorkHoursForDate(
+                target,
+                cursor,
+                config.defaultDailyRequiredMinutes
+              )
+            ) * 60,
+            config.defaultDailyRequiredMinutes
+          )
+        );
+      }
 
       const record = attendanceByDate.get(cursor);
+      const approvedLeave = approvedLeaveForDate(cursor);
+      const leaveType = String(
+        approvedLeave?.leave_type || ''
+      ).toUpperCase();
 
-      // Do not penalize an untouched current day.
-      if (!record && cursor === systemCurrentDate) {
-        attendanceScores.push(100);
-        continue;
+      const isApprovedUnpaidLeave =
+        leaveType === 'UNPAID';
+
+      const isApprovedNeutralLeave =
+        !!approvedLeave && !isApprovedUnpaidLeave;
+
+      const isMarkedAbsent =
+        String(record?.status || '').toUpperCase() === 'ABSENT';
+
+      let workedMinutes = 0;
+      let missingMinutes = 0;
+      let effectiveStatus = record?.status || 'NO_RECORD';
+
+      if (isApprovedUnpaidLeave) {
+        effectiveStatus = 'LEAVE';
+        workedMinutes = 0;
+        missingMinutes = requiredMinutes;
+      } else if (isApprovedNeutralLeave) {
+        effectiveStatus = 'LEAVE';
+        workedMinutes = requiredMinutes;
+        missingMinutes = 0;
+      } else if (isMarkedAbsent) {
+        effectiveStatus = 'ABSENT';
+        workedMinutes = 0;
+        missingMinutes = requiredMinutes;
+      } else if (record) {
+        workedMinutes = Math.min(
+          requiredMinutes,
+          Math.max(0, safeNumber(record.worked_minutes, 0))
+        );
+        missingMinutes = Math.max(0, requiredMinutes - workedMinutes);
+      } else if (cursor < systemCurrentDate) {
+        effectiveStatus = 'ABSENT';
+        workedMinutes = 0;
+        missingMinutes = requiredMinutes;
+      } else {
+        workedMinutes = 0;
+        missingMinutes = 0;
       }
 
-      if (
-        record &&
-        String(record.status).toUpperCase() === 'LEAVE'
-      ) {
-        attendanceScores.push(100);
-        continue;
-      }
+      totalWorkedMinutes += workedMinutes;
+      qualifyingMissingMinutes += missingMinutes;
 
-      if (
-        !record ||
-        String(record.status).toUpperCase() === 'ABSENT'
-      ) {
-        attendanceScores.push(0);
-        continue;
-      }
-
-      const workedHours = Math.max(
-        0,
-        safeNumber(record.worked_hours)
-      );
-      const missingHours = Math.max(
-        0,
-        requiredHours - workedHours
-      );
-
-      const deduction = Math.min(
-        dailyDeduction,
-        missingHours * (dailyDeduction / requiredHours)
-      );
-
-      attendanceScores.push(
-        clampPercent(100 - deduction, 100)
-      );
+      resolvedAttendanceDays.push({
+        date: cursor,
+        status: effectiveStatus,
+        leave_type: leaveType || null,
+        attendance_deduction_eligible: missingMinutes > 0,
+        required_minutes: requiredMinutes,
+        worked_minutes: workedMinutes,
+        missing_minutes: missingMinutes
+      });
     }
 
     /*
-     * LEAVE DEDUCTION
-     *
-     * Only APPROVED UNPAID leave.
-     * The complete leave interval inside the selected month is counted,
-     * even when those dates are in the future. This makes the deduction
-     * immediate after approval.
+     * Store one daily snapshot. Each full working day missed (ABSENT / UNPAID LEAVE)
+     * deducts exactly (100 / totalWorkingDays)% (e.g. 3.846% per day for 26 days).
+     * Partial attendance deducts proportionally to that day's shortfall.
      */
-    let unpaidLeaveDays = 0;
+    const perDayWeight = 100.0 / Math.max(1, config.totalWorkingDays);
 
-    for (const leave of unpaidLeaves) {
-      let cursor = dateOnlyValue(leave.start_date);
-      const end = dateOnlyValue(leave.end_date);
+    for (const day of resolvedAttendanceDays) {
+      const dailyAttendance =
+        day.required_minutes > 0
+          ? clampPercent(
+              (day.worked_minutes / day.required_minutes) * 100
+            )
+          : 100;
 
-      const effectiveStart =
-        cursor < periodStart ? periodStart : cursor;
-      const effectiveEnd =
-        end > monthEnd ? monthEnd : end;
+      const dayMissedRatio =
+        day.required_minutes > 0
+          ? Math.min(1, Math.max(0, day.missing_minutes / day.required_minutes))
+          : 0;
 
-      cursor = effectiveStart;
+      const dailyDeduction = clampPercent(dayMissedRatio * perDayWeight);
 
-      while (cursor <= effectiveEnd) {
-        if (!isSunday(cursor)) {
-          unpaidLeaveDays += 1;
-        }
-        cursor = shiftDate(cursor, 1);
-      }
+      const daily = {
+        ...day,
+        attendance_percentage: dailyAttendance,
+        deduction_percentage: dailyDeduction
+      };
+
+      attendanceDaily.push(daily);
+
+      await query(
+        `INSERT INTO performance_attendance_daily(
+           employee_id,
+           work_date,
+           required_minutes,
+           worked_minutes,
+           missing_minutes,
+           attendance_percentage,
+           deduction_percentage
+         )
+         VALUES($1,$2::date,$3,$4,$5,$6,$7)
+         ON CONFLICT(employee_id,work_date)
+         DO UPDATE SET
+           required_minutes=EXCLUDED.required_minutes,
+           worked_minutes=EXCLUDED.worked_minutes,
+           missing_minutes=EXCLUDED.missing_minutes,
+           attendance_percentage=EXCLUDED.attendance_percentage,
+           deduction_percentage=EXCLUDED.deduction_percentage,
+           updated_at=now()`,
+        [
+          target,
+          daily.date,
+          daily.required_minutes,
+          daily.worked_minutes,
+          daily.missing_minutes,
+          daily.attendance_percentage,
+          daily.deduction_percentage
+        ]
+      );
     }
 
-    const leaveDeduction = Math.min(
-      100,
-      unpaidLeaveDays * dailyDeduction
+    const totalMissingMinutes = qualifyingMissingMinutes;
+
+    // Total monthly attendance deduction is the sum of daily deductions across the month
+    const totalDailyDeductionSum = attendanceDaily.reduce(
+      (sum, d) => sum + safeNumber(d.deduction_percentage, 0),
+      0
+    );
+
+    const attendanceDeduction = clampPercent(totalDailyDeductionSum);
+
+    const attendancePerformance = clampPercent(
+      100 - attendanceDeduction
     );
 
     /*
-     * TASK DEDUCTION
+     * TASK PERFORMANCE
      *
-     * Task Deduction =
-     *   (total overdue calendar days across all tasks × 20)
-     *   ÷ total number of tasks
+     * Completion Days:
+     * start day = day 1.
+     * 1–5 days = 100% with the default configuration.
+     * Each day after the allowed deadline removes the configured
+     * percentage points.
      */
-    let totalTaskOverdueDays = 0;
-    const taskScores: number[] = [];
+    const taskDetails: any[] = [];
 
     const calendarDayNumber = (value: Date) =>
       Date.UTC(
@@ -4211,124 +4885,158 @@ export async function performance(req: Request, res: Response) {
       );
 
     for (const task of taskResult.rows) {
-      const due = task.due_date
-        ? new Date(task.due_date)
-        : null;
+      const taskStart =
+        task.start_date
+          ? dateOnlyValue(task.start_date)
+          : dateOnlyValue(task.created_at);
 
-      const completed =
+      /*
+       * Task age is measured from the START DATE, not created_at.
+       * A task created today with a previous start date therefore
+       * receives the correct overdue deduction immediately.
+       *
+       * Completed tasks use their actual completion date.
+       * Open tasks are evaluated through calculationEnd.
+       */
+      const completionDate =
         String(task.status).toUpperCase() === 'COMPLETED' &&
         task.completed_at
-          ? new Date(task.completed_at)
-          : new Date(`${calculationEnd}T00:00:00Z`);
+          ? dateOnlyValue(task.completed_at)
+          : calculationEnd;
 
-      if (!due || !Number.isFinite(due.getTime())) {
-        taskScores.push(100);
-        continue;
-      }
+      // Never use created_at to determine task age. The performance window
+      // uses the task's actual Start Date and End Date (due_date) to find
+      // tasks that belong to the period. The score itself is based on the
+      // number of calendar days from Start Date through completion/current
+      // calculation date, so a task created today with an older Start Date
+      // is immediately evaluated as overdue when appropriate.
 
-      const dueDay = calendarDayNumber(due);
-      const completionDay = calendarDayNumber(completed);
-
-      if (completionDay <= dueDay) {
-        taskScores.push(100);
-        continue;
-      }
-
-      let extraDays = Math.max(
-        0,
-        Math.floor(
-          (completionDay - dueDay) /
-            (24 * 60 * 60 * 1000)
-        )
+      const start = new Date(
+        `${taskStart}T00:00:00Z`
       );
 
-      // Approved PAID/SICK leave pauses task-delay counting.
-      extraDays = Math.max(
-        0,
-        extraDays -
-          countNeutralLeaveDaysAfterDueDate(
-            due,
-            completed,
-            neutralLeaves
-          )
+      const completed = new Date(
+        `${completionDate}T00:00:00Z`
       );
 
-      totalTaskOverdueDays += extraDays;
-      taskScores.push(
-        Math.max(0, 100 - extraDays * 20)
-      );
+      const completionDays =
+        Number.isFinite(start.getTime()) &&
+        Number.isFinite(completed.getTime())
+          ? Math.max(
+              1,
+              Math.floor(
+                (
+                  calendarDayNumber(completed) -
+                  calendarDayNumber(start)
+                ) /
+                  (24 * 60 * 60 * 1000)
+              ) + 1
+            )
+          : 1;
+
+      const extraDays =
+        Math.max(
+          completionDays -
+            config.taskDeadlineDays,
+          0
+        );
+
+      const taskScore =
+        Math.max(
+          0,
+          100 -
+            (
+              extraDays *
+              config.taskLateDeductionPerDay
+            )
+        );
+
+      taskDetails.push({
+        id: Number(task.id),
+        title: task.title,
+        task_type: task.task_type,
+        start_date: taskStart,
+        due_date: task.due_date
+          ? dateOnlyValue(task.due_date)
+          : null,
+        completion_date: completionDate,
+        completion_days: completionDays,
+        allowed_days:
+          config.taskDeadlineDays,
+        extra_days: extraDays,
+        score: clampPercent(taskScore),
+        status: task.status
+      });
     }
 
-    const taskDeduction = taskScores.length
-      ? Math.min(
-          100,
-          (totalTaskOverdueDays * 20) /
-            taskScores.length
-        )
-      : 0;
+    const taskCount =
+      taskDetails.length;
 
-    const deductions = Number(
-      Math.min(
-        100,
-        taskDeduction + leaveDeduction
-      ).toFixed(2)
-    );
-
-    const score = Number(
-      (100 - deductions).toFixed(2)
-    );
-
-    const attendance = clampPercent(
-      calculateAverage(attendanceScores, 100),
-      100
-    );
-
-    const taskCompletion = clampPercent(
-      calculateAverage(taskScores, 100),
-      100
-    );
-
-    const workingAttendanceDays = workingDaysSeen
-      .map((dateText) => attendanceByDate.get(dateText))
-      .filter(
-        (record) =>
-          record &&
-          String(record.status).toUpperCase() !==
-            'ABSENT'
+    const taskTotalScore =
+      taskDetails.reduce(
+        (sum, task) =>
+          sum +
+          safeNumber(task.score, 0),
+        0
       );
 
-    const workingHours = workingAttendanceDays.length
-      ? clampPercent(
-          (workingAttendanceDays.reduce(
-            (sum: number, record: any) => {
-              const dateText = dateOnlyValue(
-                record.work_date
-              );
+    const maximumTaskScore =
+      taskCount * 100;
 
-              const requiredHours = isSaturday(
-                dateText
-              )
-                ? saturdayHours
-                : normalDayHours;
+    const taskPerformance =
+      maximumTaskScore > 0
+        ? clampPercent(
+            (
+              taskTotalScore /
+              maximumTaskScore
+            ) * 100
+          )
+        : 100;
 
-              return (
-                sum +
-                Math.min(
-                  safeNumber(record.worked_hours) /
-                    requiredHours,
-                  1
-                )
-              );
-            },
-            0
-          ) /
-            workingAttendanceDays.length) *
-            100,
-          100
-        )
-      : 100;
+    const taskDeduction =
+      clampPercent(
+        100 - taskPerformance
+      );
 
-    // Keep one record per employee per calendar month.
+    /*
+     * FINAL:
+     * Attendance deduction + Task deduction.
+     * Leave is no longer a separate deduction component.
+     */
+    const totalDeduction =
+      clampPercent(
+        attendanceDeduction +
+          taskDeduction
+      );
+
+    const finalPayable =
+      clampPercent(
+        100 - totalDeduction
+      );
+
+    const finalAmount =
+      basePay === null
+        ? null
+        : basePay *
+          (finalPayable / 100);
+
+    /*
+     * Keep legacy columns populated for compatibility.
+     * They do not create additional deduction components.
+     */
+    const averageWorkedHours =
+      config.totalWorkingDays > 0
+        ? (
+            totalWorkedMinutes /
+            60 /
+            config.totalWorkingDays
+          )
+        : 0;
+
+    const requiredWorkHours =
+      config.defaultDailyRequiredMinutes /
+      60;
+
     await query(
       `DELETE FROM performance_scores
        WHERE employee_id=$1
@@ -4348,42 +5056,97 @@ export async function performance(req: Request, res: Response) {
          task_deduction,
          leave_deduction,
          deductions,
-         score
+         score,
+         attendance_required_minutes,
+         attendance_worked_minutes,
+         attendance_missing_minutes,
+         attendance_deduction,
+         task_count,
+         task_total_score,
+         task_deadline_days,
+         task_late_deduction_per_day,
+         total_working_days,
+         task_details,
+         base_pay,
+         base_pay_label
        )
        VALUES(
-         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11
+         $1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,
+         $11,$12,$13,$14,$15,$16,$17,$18,$19,$20::jsonb,$21,$22
        )
        RETURNING *`,
       [
         target,
         monthStart,
         monthEnd,
-        taskCompletion,
-        attendance,
-        workingHours,
-        minimumWorkHours,
-        Number(taskDeduction.toFixed(2)),
-        Number(leaveDeduction.toFixed(2)),
-        deductions,
-        score,
+        taskPerformance,
+        attendancePerformance,
+        averageWorkedHours,
+        requiredWorkHours,
+        taskDeduction,
+        totalDeduction,
+        finalPayable,
+        totalRequiredMinutes,
+        totalWorkedMinutes,
+        totalMissingMinutes,
+        attendanceDeduction,
+        taskCount,
+        taskTotalScore,
+        config.taskDeadlineDays,
+        config.taskLateDeductionPerDay,
+        config.totalWorkingDays,
+        JSON.stringify(taskDetails),
+        basePay,
+        basePayLabel
       ]
     );
 
     calculated.push({
       ...r.rows[0],
-      attendance_deduction: Number(
-        leaveDeduction.toFixed(2)
-      ),
-      task_deduction: Number(
-        taskDeduction.toFixed(2)
-      ),
-      leave_deduction: Number(
-        leaveDeduction.toFixed(2)
-      ),
-      deductions,
-      score,
-      month: calculationMonth,
-      year: calculationYear,
+      attendance_required_minutes:
+        totalRequiredMinutes,
+      attendance_worked_minutes:
+        totalWorkedMinutes,
+      attendance_missing_minutes:
+        totalMissingMinutes,
+      attendance_deduction:
+        attendanceDeduction,
+      task_count:
+        taskCount,
+      task_total_score:
+        taskTotalScore,
+      task_performance:
+        taskPerformance,
+      task_deduction:
+        taskDeduction,
+      total_deduction:
+        totalDeduction,
+      final_payable:
+        finalPayable,
+      score:
+        finalPayable,
+      total_working_days:
+        config.totalWorkingDays,
+      default_daily_required_minutes:
+        config.defaultDailyRequiredMinutes,
+      task_deadline_days:
+        config.taskDeadlineDays,
+      task_late_deduction_per_day:
+        config.taskLateDeductionPerDay,
+      task_details:
+        taskDetails,
+      attendance_daily:
+        attendanceDaily,
+      base_pay:
+        basePay,
+      base_pay_label:
+        basePayLabel,
+      final_amount:
+        finalAmount,
+      month:
+        calculationMonth,
+      year:
+        calculationYear
     });
   }
 
@@ -4396,11 +5159,13 @@ export async function performance(req: Request, res: Response) {
           scores: calculated,
           month: calculationMonth,
           year: calculationYear,
+          config
         }
   );
 }
 
 export async function performanceList(req: Request, res: Response) {
+  const requestedEmployeeId = Number(req.query.employeeId || 0);
   const month = Number(req.query.month || 0);
   const year = Number(req.query.year || 0);
 
@@ -4410,9 +5175,18 @@ export async function performanceList(req: Request, res: Response) {
   if (req.user!.role === 'EMPLOYEE') {
     p.push(req.user!.employeeId);
     w += ` AND p.employee_id=$${p.length}`;
+  } else if (requestedEmployeeId) {
+    if (
+      req.user!.role === 'TEAM_LEAD' &&
+      !(await requireTeamAuthority(req, requestedEmployeeId))
+    ) {
+      return res.status(403).json({ message: 'This employee is outside your team.' });
+    }
+    p.push(requestedEmployeeId);
+    w += ` AND p.employee_id=$${p.length}`;
   } else if (req.user!.role === 'TEAM_LEAD') {
     p.push(req.user!.employeeId);
-    w += ` AND e.team_lead_id=$${p.length}`;
+    w += ` AND (p.employee_id=$${p.length} OR e.team_lead_id=$${p.length})`;
   }
 
   if (month >= 1 && month <= 12) {
@@ -4439,17 +5213,58 @@ export async function performanceList(req: Request, res: Response) {
       e.first_name||' '||e.last_name employee_name,
       d.name department_name,
       CASE
-        WHEN p.score='NaN'::numeric
-          THEN 0
+        WHEN p.score='NaN'::numeric THEN 0
         ELSE COALESCE(p.score,0)
       END::numeric AS safe_score,
       COALESCE(
         p.required_work_hours,
-        3
-      )::numeric AS required_work_hours
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='EMPLOYEE' AND wh.scope_id=e.id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='TEAM' AND wh.scope_id=e.team_lead_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEPARTMENT' AND wh.scope_id=e.department_id ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT wh.hours FROM work_hours_settings wh WHERE wh.scope='DEFAULT' ORDER BY wh.updated_at DESC, wh.id DESC LIMIT 1),
+        (SELECT (NULLIF(ss.value, '')::numeric / 60.0) FROM system_settings ss WHERE ss.key = 'performance_default_daily_required_minutes' LIMIT 1),
+        8.00
+      )::numeric AS required_work_hours,
+      COALESCE(
+        p.attendance_required_minutes,
+        (COALESCE(p.required_work_hours, 8.00) * 60.0)
+      )::numeric AS attendance_required_minutes,
+      COALESCE(p.task_completion,0)::numeric AS task_performance,
+      COALESCE(p.attendance,0)::numeric AS attendance_performance,
+      COALESCE(
+        p.attendance_deduction,
+        GREATEST(0,100-COALESCE(p.attendance,0))
+      )::numeric AS calculated_attendance_deduction,
+      CASE
+        WHEN p.task_deduction IS NULL THEN
+          GREATEST(0, 100-COALESCE(p.task_completion,0))
+        ELSE p.task_deduction
+      END::numeric AS calculated_task_deduction,
+      COALESCE(p.deductions,0)::numeric AS calculated_total_deduction,
+      GREATEST(0,LEAST(100,COALESCE(p.score,0)))::numeric AS calculated_final_payable,
+      COALESCE(
+        daily.attendance_daily,
+        '[]'::json
+      ) AS attendance_daily
     FROM performance_scores p
     JOIN employees e ON e.id=p.employee_id
     LEFT JOIN departments d ON d.id=e.department_id
+    LEFT JOIN LATERAL (
+      SELECT json_agg(
+        json_build_object(
+          'work_date', x.work_date,
+          'required_minutes', x.required_minutes,
+          'worked_minutes', x.worked_minutes,
+          'missing_minutes', x.missing_minutes,
+          'attendance_percentage', x.attendance_percentage,
+          'deduction_percentage', x.deduction_percentage
+        )
+        ORDER BY x.work_date
+      ) AS attendance_daily
+      FROM performance_attendance_daily x
+      WHERE x.employee_id=p.employee_id
+        AND x.work_date BETWEEN p.period_start AND p.period_end
+    ) daily ON true
     ${w}
     ORDER BY
       p.employee_id,
@@ -4461,25 +5276,96 @@ export async function performanceList(req: Request, res: Response) {
   );
 
   res.json(
-    r.rows.map((row: any) => ({
-      ...row,
-      attendance_deduction: Number(
-        row.leave_deduction || 0
-      ),
-      score: Number.isFinite(
-        Number(row.safe_score)
-      )
-        ? Math.max(
-            0,
-            Math.min(
-              100,
-              Number(row.safe_score)
-            )
+    r.rows.map((row: any) => {
+      const taskPerformance = Number(row.task_performance);
+      const attendancePerformance = Number(row.attendance_performance);
+      const taskDeduction = Number(row.calculated_task_deduction);
+      const attendanceDeduction = Number(
+        row.calculated_attendance_deduction
+      );
+
+      const totalDeduction = Math.min(
+        100,
+        Math.max(
+          0,
+          Number.isFinite(
+            Number(row.calculated_total_deduction)
           )
-        : 0,
-    }))
+            ? Number(row.calculated_total_deduction)
+            : attendanceDeduction + taskDeduction
+        )
+      );
+
+      const finalPayable = Math.max(
+        0,
+        Math.min(
+          100,
+          Number.isFinite(
+            Number(row.calculated_final_payable)
+          )
+            ? Number(row.calculated_final_payable)
+            : 100 - totalDeduction
+        )
+      );
+
+      return {
+        ...row,
+        task_performance: Number.isFinite(taskPerformance)
+          ? Math.max(0, Math.min(100, taskPerformance))
+          : 0,
+        attendance_performance: Number.isFinite(attendancePerformance)
+          ? Math.max(0, Math.min(100, attendancePerformance))
+          : 0,
+        task_deduction: Number.isFinite(taskDeduction)
+          ? Math.max(0, Math.min(100, taskDeduction))
+          : 0,
+        attendance_deduction: Number.isFinite(attendanceDeduction)
+          ? Math.max(0, Math.min(100, attendanceDeduction))
+          : 0,
+        total_deduction: totalDeduction,
+        final_payable: finalPayable,
+        score: finalPayable
+      };
+    })
+  );}
+export async function deleteWorkHoursDate(req: Request, res: Response) {
+  if (req.user!.role !== 'SUPER_ADMIN') {
+    return res.status(403).json({
+      message: 'Only Super Admin can modify work-hours settings.'
+    });
+  }
+
+  const id = Number(req.params.id);
+
+  const r = await query<any>(
+    `DELETE FROM work_hours_date_overrides
+     WHERE id=$1
+     RETURNING *`,
+    [id]
   );
+
+  if (!r.rows[0]) {
+    return res.status(404).json({
+      message: 'Date-specific work-hours override not found.'
+    });
+  }
+
+  await audit(
+    req.user?.userId,
+    'DELETE',
+    'WORK_HOURS',
+    id,
+    {
+      scope: r.rows[0].scope,
+      scopeId: r.rows[0].scope_id,
+      effectiveDate: r.rows[0].effective_date
+    }
+  );
+
+  res.json({ ok: true });
 }
+
+
 /* =========================================================
    NOTIFICATIONS
 ========================================================= */
@@ -4751,7 +5637,7 @@ export async function activity(req: Request, res: Response) {
 }
 export async function getSettings(_req: Request, res: Response) { const r = await query<any>('SELECT key,value FROM system_settings ORDER BY key'); res.json(Object.fromEntries(r.rows.map((x: any) => [x.key, x.value]))); }
 export async function saveSettings(req: Request, res: Response) {
-  const allowed = ['company_name', 'office_address', 'office_latitude', 'office_longitude', 'geofence_radius_m', 'work_start_time', 'late_after_time', 'minimum_work_minutes'];
+  const allowed = ['company_name', 'office_address', 'office_latitude', 'office_longitude', 'geofence_radius_m', 'work_start_time', 'late_after_time', 'minimum_work_minutes', 'performance_total_working_days', 'performance_default_daily_required_minutes', 'performance_task_deadline_days', 'performance_task_late_deduction_per_day'];
   for (const [key, value] of Object.entries(req.body)) if (allowed.includes(key)) await query(`INSERT INTO system_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=now()`, [key, String(value ?? '')]);
   await audit(req.user?.userId, 'UPDATE', 'SETTINGS', null, req.body); res.json({ ok: true });
 }
@@ -4777,3 +5663,294 @@ export async function exportCsv(req: Request, res: Response) {
   const escape = (v: any) => `"${String(v ?? '').replaceAll('"', '""')}"`; const headers = rows[0] ? Object.keys(rows[0]) : []; const csv = [headers.map(escape).join(','), ...rows.map(row => headers.map(h => escape(row[h])).join(','))].join('\n');
   res.header('Content-Type', 'text/csv'); res.header('Content-Disposition', `attachment; filename=withx-${kind}.csv`); res.send(csv);
 }
+
+/* =========================================================
+   INTERNAL MESSAGING / CHAT SYSTEM
+   ========================================================= */
+
+export async function listConversations(req: Request, res: Response) {
+  const me = req.user!.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const r = await query<any>(`
+    SELECT
+      c.id,
+      c.created_at,
+      c.updated_at,
+      c.last_message_text,
+      c.last_message_at,
+      cp.last_read_at,
+      (
+        SELECT count(*)::int
+        FROM messages m
+        WHERE m.conversation_id = c.id
+          AND m.sender_id <> $1
+          AND m.created_at > cp.last_read_at
+      ) AS unread_count,
+      other.id AS other_user_id,
+      other.employee_code AS other_user_code,
+      other.first_name || ' ' || other.last_name AS other_user_name,
+      other.user_type AS other_user_type,
+      other.job_title AS other_user_job_title,
+      COALESCE(other.photo_url, '') AS other_user_photo,
+      d.name AS other_user_department,
+      u.role AS other_user_role
+    FROM conversations c
+    JOIN conversation_participants cp
+      ON cp.conversation_id = c.id
+     AND cp.employee_id = $1
+    JOIN conversation_participants cp_other
+      ON cp_other.conversation_id = c.id
+     AND cp_other.employee_id <> $1
+    JOIN employees other
+      ON other.id = cp_other.employee_id
+    LEFT JOIN users u
+      ON u.employee_id = other.id
+    LEFT JOIN departments d
+      ON d.id = other.department_id
+    ORDER BY COALESCE(c.last_message_at, c.updated_at, c.created_at) DESC
+  `, [me]);
+
+  res.json(r.rows);
+}
+
+export async function createOrGetConversation(req: Request, res: Response) {
+  const me = req.user!.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const recipientId = Number(req.body.recipientId);
+  if (!recipientId || recipientId === me) {
+    return res.status(400).json({ message: 'Valid recipient employee ID required.' });
+  }
+
+  // Check if recipient exists and is active
+  const recCheck = await query<any>(
+    'SELECT id, first_name, last_name FROM employees WHERE id=$1 AND status <> $2',
+    [recipientId, 'INACTIVE']
+  );
+  if (!recCheck.rows[0]) {
+    return res.status(404).json({ message: 'Recipient employee not found.' });
+  }
+
+  // Look for existing 1-on-1 conversation
+  const existing = await query<any>(`
+    SELECT c.id
+    FROM conversations c
+    JOIN conversation_participants p1 ON p1.conversation_id = c.id AND p1.employee_id = $1
+    JOIN conversation_participants p2 ON p2.conversation_id = c.id AND p2.employee_id = $2
+    LIMIT 1
+  `, [me, recipientId]);
+
+  let conversationId: number;
+
+  if (existing.rows[0]) {
+    conversationId = Number(existing.rows[0].id);
+  } else {
+    const created = await query<any>(
+      `INSERT INTO conversations(created_at, updated_at) VALUES(now(), now()) RETURNING id`
+    );
+    conversationId = Number(created.rows[0].id);
+
+    await query(
+      `INSERT INTO conversation_participants(conversation_id, employee_id, last_read_at)
+       VALUES ($1, $2, now()), ($1, $3, now())`,
+      [conversationId, me, recipientId]
+    );
+  }
+
+  // Return conversation details
+  const r = await query<any>(`
+    SELECT
+      c.id,
+      c.created_at,
+      c.updated_at,
+      c.last_message_text,
+      c.last_message_at,
+      cp.last_read_at,
+      (
+        SELECT count(*)::int
+        FROM messages m
+        WHERE m.conversation_id = c.id
+          AND m.sender_id <> $1
+          AND m.created_at > cp.last_read_at
+      ) AS unread_count,
+      other.id AS other_user_id,
+      other.employee_code AS other_user_code,
+      other.first_name || ' ' || other.last_name AS other_user_name,
+      other.user_type AS other_user_type,
+      other.job_title AS other_user_job_title,
+      COALESCE(other.photo_url, '') AS other_user_photo,
+      d.name AS other_user_department,
+      u.role AS other_user_role
+    FROM conversations c
+    JOIN conversation_participants cp
+      ON cp.conversation_id = c.id
+     AND cp.employee_id = $1
+    JOIN conversation_participants cp_other
+      ON cp_other.conversation_id = c.id
+     AND cp_other.employee_id <> $1
+    JOIN employees other
+      ON other.id = cp_other.employee_id
+    LEFT JOIN users u
+      ON u.employee_id = other.id
+    LEFT JOIN departments d
+      ON d.id = other.department_id
+    WHERE c.id = $2
+  `, [me, conversationId]);
+
+  res.json(r.rows[0] || { id: conversationId });
+}
+
+export async function getConversationMessages(req: Request, res: Response) {
+  const me = req.user!.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const conversationId = Number(req.params.id);
+  if (!conversationId) return res.status(400).json({ message: 'Invalid conversation ID' });
+
+  // Verify participation
+  const part = await query<any>(
+    'SELECT 1 FROM conversation_participants WHERE conversation_id=$1 AND employee_id=$2',
+    [conversationId, me]
+  );
+  if (!part.rows[0]) {
+    return res.status(403).json({ message: 'You are not a participant in this conversation.' });
+  }
+
+  // Mark conversation as read
+  await query(
+    'UPDATE conversation_participants SET last_read_at=now() WHERE conversation_id=$1 AND employee_id=$2',
+    [conversationId, me]
+  );
+
+  const r = await query<any>(`
+    SELECT
+      m.id,
+      m.conversation_id,
+      m.sender_id,
+      m.message_text,
+      m.created_at,
+      e.employee_code AS sender_code,
+      e.first_name || ' ' || e.last_name AS sender_name,
+      (m.sender_id = $2) AS is_mine
+    FROM messages m
+    JOIN employees e ON e.id = m.sender_id
+    WHERE m.conversation_id = $1
+    ORDER BY m.created_at ASC, m.id ASC
+    LIMIT 300
+  `, [conversationId, me]);
+
+  res.json(r.rows);
+}
+
+export async function sendMessage(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const conversationId = Number(req.params.id);
+  const messageText = String(req.body.messageText || req.body.content || '').trim();
+
+  if (!conversationId) return res.status(400).json({ message: 'Invalid conversation ID' });
+  if (!messageText) return res.status(400).json({ message: 'Message text cannot be empty' });
+  if (messageText.length > 5000) return res.status(400).json({ message: 'Message is too long (max 5000 chars)' });
+
+  // Verify participation
+  const part = await query<any>(
+    'SELECT 1 FROM conversation_participants WHERE conversation_id=$1 AND employee_id=$2',
+    [conversationId, me]
+  );
+  if (!part.rows[0]) {
+    return res.status(403).json({ message: 'You are not a participant in this conversation.' });
+  }
+
+  const r = await query<any>(`
+    INSERT INTO messages(conversation_id, sender_id, message_text, created_at)
+    VALUES($1, $2, $3, now())
+    RETURNING id, conversation_id, sender_id, message_text, created_at
+  `, [conversationId, me, messageText]);
+
+  // Update conversation last message timestamp
+  await query(`
+    UPDATE conversations
+    SET last_message_text = $1,
+        last_message_at = now(),
+        updated_at = now()
+    WHERE id = $2
+  `, [messageText.slice(0, 200), conversationId]);
+
+  // Update sender read timestamp
+  await query(`
+    UPDATE conversation_participants
+    SET last_read_at = now()
+    WHERE conversation_id = $1 AND employee_id = $2
+  `, [conversationId, me]);
+
+  const senderInfo = await query<any>(
+    `SELECT employee_code, first_name || ' ' || last_name AS sender_name FROM employees WHERE id=$1`,
+    [me]
+  );
+
+  res.status(201).json({
+    ...r.rows[0],
+    sender_code: senderInfo.rows[0]?.employee_code,
+    sender_name: senderInfo.rows[0]?.sender_name,
+    is_mine: true
+  });
+}
+
+export async function markConversationRead(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const conversationId = Number(req.params.id);
+  if (!conversationId) return res.status(400).json({ message: 'Invalid conversation ID' });
+
+  await query(`
+    UPDATE conversation_participants
+    SET last_read_at = now()
+    WHERE conversation_id = $1 AND employee_id = $2
+  `, [conversationId, me]);
+
+  res.json({ ok: true });
+}
+
+export async function searchUsersForMessaging(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  const search = String(req.query.q || '').trim();
+
+  const p: any[] = [];
+  let w = `WHERE e.status = 'ACTIVE'`;
+
+  if (me) {
+    p.push(me);
+    w += ` AND e.id <> $${p.length}`;
+  }
+
+  if (search) {
+    p.push(`%${search}%`);
+    w += ` AND (e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length} OR e.employee_code ILIKE $${p.length} OR e.email ILIKE $${p.length} OR COALESCE(d.name,'') ILIKE $${p.length} OR COALESCE(e.job_title,'') ILIKE $${p.length})`;
+  }
+
+  const r = await query<any>(`
+    SELECT
+      e.id,
+      e.employee_code,
+      e.first_name,
+      e.last_name,
+      e.email,
+      e.job_title,
+      e.user_type,
+      COALESCE(e.photo_url, '') AS photo_url,
+      d.name AS department_name,
+      u.role
+    FROM employees e
+    LEFT JOIN users u ON u.employee_id = e.id
+    LEFT JOIN departments d ON d.id = e.department_id
+    ${w}
+    ORDER BY e.first_name ASC, e.last_name ASC
+    LIMIT 50
+  `, p);
+
+  res.json(r.rows);
+}
+

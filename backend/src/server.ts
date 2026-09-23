@@ -8,8 +8,12 @@ import path from 'path';
 import routes from './routes/index.js';
 import { errorHandler } from './middleware/error.js';
 import { markEndOfDayAbsences } from './controllers/coreController.js';
+import { runAutoMigrations } from './config/migrate.js';
 
 dotenv.config();
+
+// Run schema verification / auto-migrations on startup
+void runAutoMigrations();
 
 const app = express();
 

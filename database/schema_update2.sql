@@ -107,11 +107,10 @@ CREATE TABLE IF NOT EXISTS daily_reports (
 CREATE TABLE IF NOT EXISTS leave_requests (
   id SERIAL PRIMARY KEY,
   employee_id INT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
-  leave_type VARCHAR(30) NOT NULL CHECK(leave_type IN('PAID','SICK','UNPAID')),
+  leave_type VARCHAR(30) NOT NULL CHECK(leave_type IN('CASUAL','SICK','EARNED','UNPAID','OTHER')),
   start_date DATE NOT NULL,
   end_date DATE NOT NULL,
   reason TEXT NOT NULL,
-  reference_link TEXT,
   status VARCHAR(20) NOT NULL DEFAULT 'PENDING' CHECK(status IN('PENDING','APPROVED','REJECTED','CANCELLED')),
   reviewed_by INT REFERENCES employees(id) ON DELETE SET NULL,
   review_comment TEXT,

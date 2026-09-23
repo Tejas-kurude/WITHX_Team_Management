@@ -1,0 +1,46 @@
+-- WITHX Performance compatibility migration v21
+-- Fixes databases where performance_scores was created without the
+-- legacy NOT NULL compatibility columns used by the current INSERT.
+--
+-- These columns are NOT part of the new performance calculation:
+--   on_time            -> always stores 100
+--   punctuality        -> always stores 0
+--   report_consistency -> always stores 0
+--
+-- This migration does not recalculate attendance, task scores,
+-- deductions, payable percentage, or salary/stipend.
+
+BEGIN;
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS on_time NUMERIC(12,8);
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS punctuality NUMERIC(12,8);
+
+ALTER TABLE performance_scores
+  ADD COLUMN IF NOT EXISTS report_consistency NUMERIC(12,8);
+
+UPDATE performance_scores
+SET on_time = 100
+WHERE on_time IS NULL;
+
+UPDATE performance_scores
+SET punctuality = 0
+WHERE punctuality IS NULL;
+
+UPDATE performance_scores
+SET report_consistency = 0
+WHERE report_consistency IS NULL;
+
+ALTER TABLE performance_scores
+  ALTER COLUMN on_time SET DEFAULT 100,
+  ALTER COLUMN punctuality SET DEFAULT 0,
+  ALTER COLUMN report_consistency SET DEFAULT 0;
+
+ALTER TABLE performance_scores
+  ALTER COLUMN on_time SET NOT NULL,
+  ALTER COLUMN punctuality SET NOT NULL,
+  ALTER COLUMN report_consistency SET NOT NULL;
+
+COMMIT;

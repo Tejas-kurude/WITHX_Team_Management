@@ -21,8 +21,10 @@ export default function WorkHours() {
   const [departments, setDepartments] = useState<any[]>([]);
   const [scope, setScope] = useState('DEFAULT');
   const [scopeId, setScopeId] = useState('');
-  const [hours, setHours] = useState('3');
+  const [hours, setHours] = useState('8');
+  const [effectiveDate, setEffectiveDate] = useState('');
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [editingType, setEditingType] = useState<'GENERAL' | 'DATE' | null>(null);
   const [loading, setLoading] = useState(false);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
@@ -57,15 +59,23 @@ export default function WorkHours() {
   function resetForm() {
     setScope('DEFAULT');
     setScopeId('');
-    setHours('3');
+    setHours('8');
+    setEffectiveDate('');
     setEditingId(null);
+    setEditingType(null);
   }
 
   function editRow(row: any) {
     setScope(row.scope);
     setScopeId(row.scope === 'DEFAULT' ? '' : String(row.scope_id ?? ''));
     setHours(String(row.current_hours ?? row.hours ?? '3'));
+    setEffectiveDate(
+      row.setting_type === 'DATE'
+        ? String(row.effective_date ?? '').slice(0, 10)
+        : ''
+    );
     setEditingId(Number(row.id));
+    setEditingType(row.setting_type === 'DATE' ? 'DATE' : 'GENERAL');
     setMsg('');
     setErr('');
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -81,8 +91,17 @@ export default function WorkHours() {
         scope,
         scopeId: scope === 'DEFAULT' ? null : Number(scopeId),
         hours: Number(hours),
+        effectiveDate: effectiveDate || null,
       });
-      setMsg(editingId ? 'Work hours updated successfully.' : 'Work hours saved successfully.');
+      setMsg(
+        effectiveDate
+          ? editingId
+            ? 'Date-specific work hours updated successfully.'
+            : 'Date-specific work hours saved successfully.'
+          : editingId
+            ? 'Work hours updated successfully.'
+            : 'Work hours saved successfully.'
+      );
       resetForm();
       await load();
     } catch (e) {
@@ -92,13 +111,25 @@ export default function WorkHours() {
     }
   }
 
-  async function remove(id: number) {
+  async function remove(row: any) {
     try {
       setErr('');
       setMsg('');
-      await api.delete(`/work-hours/${id}`);
-      if (editingId === id) resetForm();
-      setMsg('Override removed. The target will inherit the next available work-hours rule.');
+
+      const endpoint =
+        row.setting_type === 'DATE'
+          ? `/work-hours/date/${Number(row.id)}`
+          : `/work-hours/${Number(row.id)}`;
+
+      await api.delete(endpoint);
+
+      if (editingId === Number(row.id)) resetForm();
+
+      setMsg(
+        row.setting_type === 'DATE'
+          ? 'Date-specific override removed. The target will use its normal rule on that date.'
+          : 'Override removed. The target will inherit the next available work-hours rule.'
+      );
       await load();
     } catch (e) {
       setErr(messageOf(e));
@@ -180,6 +211,23 @@ export default function WorkHours() {
             )}
 
             <div>
+              <label className="mb-1.5 block text-sm font-bold">
+                Specific Date
+                <span className="ml-1 text-xs font-semibold muted">(optional)</span>
+              </label>
+              <input
+                className="input w-full"
+                type="date"
+                value={effectiveDate}
+                onChange={(e) => setEffectiveDate(e.target.value)}
+                disabled={editingType === 'DATE'}
+              />
+              <p className="mt-1.5 text-xs muted">
+                Blank = general rule. A selected date changes only that date.
+              </p>
+            </div>
+
+            <div>
               <label className="mb-1.5 block text-sm font-bold">Required Work Hours / Day</label>
               <div className="flex items-center gap-2">
                 <input
@@ -199,7 +247,15 @@ export default function WorkHours() {
 
           <div className="mt-5 flex flex-wrap gap-2">
             <button className="btn btn-primary" type="submit" disabled={loading}>
-              {loading ? 'Saving...' : editingId ? 'Update Hours' : 'Save Hours'}
+              {loading
+                ? 'Saving...'
+                : effectiveDate
+                  ? editingId
+                    ? 'Update Date Hours'
+                    : 'Save Date Hours'
+                  : editingId
+                    ? 'Update Hours'
+                    : 'Save Hours'}
             </button>
             {editingId && (
               <button className="btn" type="button" onClick={resetForm}>Cancel</button>

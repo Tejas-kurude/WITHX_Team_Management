@@ -15,6 +15,7 @@ import Activity from './pages/Activity';
 import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Profile from './pages/Profile';
+import Messages from './pages/Messages';
 import WorkHours from './pages/WorkHours';
 import Legal from './pages/Legal';
 
@@ -31,6 +32,7 @@ export default function App() {
         <Route element={<Guard />}>
           <Route path="/" element={<Dashboard />} />
           <Route path="/profile" element={<Profile />} />
+          <Route path="/messages" element={<Messages />} />
           <Route path="/employees" element={<Employees />} />
           <Route path="/departments" element={<Departments />} />
           <Route path="/attendance" element={<Attendance />} />

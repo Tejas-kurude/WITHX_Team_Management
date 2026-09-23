@@ -104,7 +104,7 @@ export default function Attendance(){
             </div>
           </div>
           <div className="rounded-xl border border-[#18263F] bg-[#18263F] px-4 py-2 text-base font-extrabold text-white shadow-sm">
-            ~ {formatDuration(today?.required_work_hours ?? 3)}
+            ~ {formatDuration(Number(today?.required_work_hours || 0) > 0 ? Number(today.required_work_hours) : (Number(today?.required_work_minutes || 0) > 0 ? Number(today.required_work_minutes) / 60 : 8))}
           </div>
         </div>
 
