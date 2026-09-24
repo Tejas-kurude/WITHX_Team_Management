@@ -214,7 +214,7 @@ export default function Attendance(){
           <tbody>
             {rows.map(r=>
               <tr key={r.id}>
-                <td>{new Date(r.work_date).toLocaleDateString()}</td>
+                <td>{r.work_date ? new Date(String(r.work_date).slice(0, 10) + 'T00:00:00').toLocaleDateString() : '—'}</td>
                 {user?.role!=='EMPLOYEE'&&
                   <>
                     <td><b>{r.employee_code}</b><div className="text-xs muted">User #{r.user_id||'—'}</div></td>

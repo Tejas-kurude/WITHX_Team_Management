@@ -3324,7 +3324,21 @@ export async function listAttendance(req: Request, res: Response) {
 
   const r = await query<any>(`
     SELECT
-      a.*,
+      a.id,
+      to_char(a.work_date, 'YYYY-MM-DD') AS work_date,
+      a.employee_id,
+      a.status,
+      a.attendance_mode,
+      a.check_in,
+      a.check_out,
+      a.check_in_lat,
+      a.check_in_lng,
+      a.check_out_lat,
+      a.check_out_lng,
+      a.location_accuracy,
+      a.location_verified,
+      a.location_text,
+      a.notes,
       e.employee_code,
       e.user_type,
       e.first_name||' '||e.last_name employee_name,
@@ -3378,7 +3392,7 @@ export async function listAttendance(req: Request, res: Response) {
       )::numeric AS required_work_hours
     ) target
     ${w}
-    ORDER BY a.work_date DESC,a.check_in DESC
+    ORDER BY a.work_date DESC, a.check_in DESC NULLS LAST, a.id DESC
     LIMIT 500
   `, p);
 
@@ -3761,13 +3775,24 @@ async function getEffectiveWorkHoursForDate(
     : fallbackMinutes / 60;
 }
 
-async function getPerformanceConfig() {
+export function countWorkingDaysInMonth(year: number, month: number): number {
+  const daysInMonth = new Date(year, month, 0).getDate();
+  let workingDays = 0;
+  for (let day = 1; day <= daysInMonth; day++) {
+    const d = new Date(year, month - 1, day);
+    if (d.getDay() !== 0) {
+      workingDays++;
+    }
+  }
+  return Math.max(1, workingDays);
+}
+
+async function getPerformanceConfig(monthNumber?: number, yearNumber?: number) {
   const [sRes, whRes] = await Promise.all([
     query<any>(`
       SELECT key, value
       FROM system_settings
       WHERE key IN (
-        'performance_total_working_days',
         'performance_default_daily_required_minutes',
         'performance_task_deadline_days',
         'performance_task_late_deduction_per_day',
@@ -3792,6 +3817,11 @@ async function getPerformanceConfig() {
     return Number.isFinite(n) && n > 0 ? n : fallback;
   };
 
+  const now = new Date();
+  const y = Number(yearNumber) || now.getFullYear();
+  const m = Number(monthNumber) || (now.getMonth() + 1);
+  const dynamicTotalWorkingDays = countWorkingDaysInMonth(y, m);
+
   const defaultHours = Number(whRes.rows[0]?.hours);
   const defaultDailyRequiredMinutes =
     Number.isFinite(defaultHours) && defaultHours > 0
@@ -3802,15 +3832,7 @@ async function getPerformanceConfig() {
         );
 
   return {
-    totalWorkingDays: Math.max(
-      1,
-      Math.round(
-        numberOrDefault(
-          settings.performance_total_working_days,
-          26
-        )
-      )
-    ),
+    totalWorkingDays: dynamicTotalWorkingDays,
     defaultDailyRequiredMinutes,
     taskDeadlineDays: Math.max(
       0,
@@ -4465,8 +4487,6 @@ export async function performance(req: Request, res: Response) {
   const clampPercent = (value: any) =>
     Math.max(0, Math.min(100, safeNumber(value, 0)));
 
-  const config = await getPerformanceConfig();
-
   const dateResult = await query<any>(
     'SELECT current_date::text AS current_date'
   );
@@ -4488,6 +4508,8 @@ export async function performance(req: Request, res: Response) {
     requestedYear >= 2000 && requestedYear <= 2100
       ? requestedYear
       : currentDateObj.getUTCFullYear();
+
+  const config = await getPerformanceConfig(calculationMonth, calculationYear);
 
   const monthStart =
     `${calculationYear}-${String(calculationMonth).padStart(2, '0')}-01`;

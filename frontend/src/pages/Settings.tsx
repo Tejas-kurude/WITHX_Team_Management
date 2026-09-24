@@ -49,7 +49,7 @@ export default function Settings(){
   return <>
     <PageTitle
       title="System Settings"
-      subtitle="Company location, attendance configuration and performance calculation rules"
+      subtitle="Company location, geofencing, and attendance configuration"
     />
 
     <div className="card max-w-4xl p-6">
@@ -86,38 +86,8 @@ export default function Settings(){
           <input className="input mt-1" type="number" min="1" name="minimum_work_minutes" value={s.minimum_work_minutes||180} onChange={e=>setS({...s,minimum_work_minutes:e.target.value})}/>
         </div>
 
-        <div className="sm:col-span-2 rounded-2xl border border-cyan-200 bg-cyan-50 p-5">
-          <h2 className="text-base font-extrabold text-cyan-950">Performance Calculation Rules</h2>
-          <p className="mt-1 text-sm text-cyan-900">
-            Attendance uses exact minutes. Task performance is calculated independently. Final deduction is attendance deduction + task deduction.
-          </p>
-
-          <div className="mt-4 grid gap-4 sm:grid-cols-2">
-            <div>
-              <label className="label">Total Working Days</label>
-              <input className="input mt-1" type="number" min="1" name="performance_total_working_days" value={s.performance_total_working_days||26} onChange={e=>setS({...s,performance_total_working_days:e.target.value})}/>
-            </div>
-            <div>
-              <label className="label">Default Daily Required Minutes</label>
-              <input className="input mt-1" type="number" min="1" step="0.01" name="performance_default_daily_required_minutes" value={s.performance_default_daily_required_minutes||180} onChange={e=>setS({...s,performance_default_daily_required_minutes:e.target.value})}/>
-            </div>
-            <div>
-              <label className="label">Task Deadline (days)</label>
-              <input className="input mt-1" type="number" min="0" name="performance_task_deadline_days" value={s.performance_task_deadline_days||5} onChange={e=>setS({...s,performance_task_deadline_days:e.target.value})}/>
-            </div>
-            <div>
-              <label className="label">Late Task Deduction / Extra Day (%)</label>
-              <input className="input mt-1" type="number" min="0" max="100" step="0.01" name="performance_task_late_deduction_per_day" value={s.performance_task_late_deduction_per_day||20} onChange={e=>setS({...s,performance_task_late_deduction_per_day:e.target.value})}/>
-            </div>
-          </div>
-
-          <div className="mt-4 rounded-xl border border-cyan-100 bg-white/70 p-3 text-xs text-cyan-950">
-            Defaults: 26 working days, 180 minutes/day, 5 task days, 20% per extra task day. Saturday has no automatic 6-hour rule.
-          </div>
-        </div>
-
         <div className="sm:col-span-2 rounded-xl bg-slate-50 p-4 text-sm muted">
-          Admin and Super Admin can update the company location. Offline attendance uses browser/device GPS and the configured geofence.
+          Admin and Super Admin can update company location and attendance rules. Working days are calculated dynamically with Sundays as off days.
         </div>
 
         {msg&&<div className="sm:col-span-2 rounded-lg bg-green-50 p-3 text-sm text-green-700">{msg}</div>}
