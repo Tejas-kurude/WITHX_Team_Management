@@ -105,7 +105,7 @@ export async function runAutoMigrations() {
         ON messages(sender_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_updated
         ON conversations(updated_at DESC);
-    `); 
+    `);
 
     // 5. Create notes table for personal notepad
     await query(`
