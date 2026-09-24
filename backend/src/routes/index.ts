@@ -235,9 +235,21 @@ r.delete(
 // Internal Messaging & Chat Routes
 r.get('/messages/conversations', authenticate, c.listConversations);
 r.post('/messages/conversations', authenticate, c.createOrGetConversation);
+r.post('/messages/groups', authenticate, c.createGroupConversation);
 r.get('/messages/conversations/:id/messages', authenticate, c.getConversationMessages);
 r.post('/messages/conversations/:id/messages', authenticate, c.sendMessage);
 r.post('/messages/conversations/:id/read', authenticate, c.markConversationRead);
+r.get('/messages/conversations/:id/members', authenticate, c.getConversationMembers);
+r.post('/messages/conversations/:id/members', authenticate, c.addConversationMember);
+r.delete('/messages/conversations/:id/members/:memberId', authenticate, c.removeConversationMember);
+r.post('/messages/conversations/:id/leave', authenticate, c.leaveGroupConversation);
 r.get('/messages/users/search', authenticate, c.searchUsersForMessaging);
+
+// Notepad / Personal Notes Routes
+r.get('/notes', authenticate, c.listNotes);
+r.post('/notes', authenticate, c.createNote);
+r.get('/notes/:id', authenticate, c.getNote);
+r.put('/notes/:id', authenticate, c.updateNote);
+r.delete('/notes/:id', authenticate, c.deleteNote);
 
 export default r;

@@ -49,15 +49,23 @@ export async function runAutoMigrations() {
       WHERE a.required_work_hours IS NULL;
     `);
 
-    // 2. Create conversations table
+    // 2. Create conversations table and ensure group fields exist
     await query(`
       CREATE TABLE IF NOT EXISTS conversations (
         id BIGSERIAL PRIMARY KEY,
         created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
         last_message_text TEXT,
-        last_message_at TIMESTAMPTZ
+        last_message_at TIMESTAMPTZ,
+        is_group BOOLEAN NOT NULL DEFAULT false,
+        name VARCHAR(255),
+        created_by INT REFERENCES employees(id) ON DELETE SET NULL
       );
+
+      ALTER TABLE conversations
+        ADD COLUMN IF NOT EXISTS is_group BOOLEAN NOT NULL DEFAULT false,
+        ADD COLUMN IF NOT EXISTS name VARCHAR(255),
+        ADD COLUMN IF NOT EXISTS created_by INT REFERENCES employees(id) ON DELETE SET NULL;
     `);
 
     // 3. Create conversation_participants table
@@ -97,6 +105,21 @@ export async function runAutoMigrations() {
         ON messages(sender_id);
       CREATE INDEX IF NOT EXISTS idx_conversations_updated
         ON conversations(updated_at DESC);
+    `); 
+
+    // 5. Create notes table for personal notepad
+    await query(`
+      CREATE TABLE IF NOT EXISTS notes (
+        id BIGSERIAL PRIMARY KEY,
+        user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title VARCHAR(255) NOT NULL DEFAULT 'Untitled Note',
+        content TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_notes_user_updated
+        ON notes(user_id, updated_at DESC);
     `);
 
     console.log('[DB] Auto-migrations and schema verifications completed successfully.');

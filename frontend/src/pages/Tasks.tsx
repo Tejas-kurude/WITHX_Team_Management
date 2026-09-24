@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
+import { CheckCircle2, Clock } from 'lucide-react';
 
 function toDateTimeLocal(value: any) {
   if (!value) return '';
@@ -64,6 +65,8 @@ export default function Tasks() {
   const [emps, setEmps] = useState<any[]>([]);
   const [deps, setDeps] = useState<any[]>([]);
 
+  const [taskTab, setTaskTab] = useState<'active' | 'past'>('active');
+
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
   const [publishDraftMode, setPublishDraftMode] = useState(false);
@@ -124,12 +127,20 @@ export default function Tasks() {
      LOAD TASKS
   ========================================================= */
 
-  async function load(adminOnly = showAdminTasks) {
+  async function load(adminOnly = showAdminTasks, tab = taskTab, drafts = showDrafts) {
     try {
       setPageErr('');
 
+      const params: any = {
+        ...filters,
+        statusGroup: drafts ? undefined : tab,
+      };
+      if (drafts) {
+        params.status = 'DRAFT';
+      }
+
       const r = await api.get('/tasks', {
-        params: filters,
+        params,
       });
 
       const taskRows = Array.isArray(r.data)
@@ -1015,6 +1026,65 @@ async function toggleReviewHistory(task: any) {
 
       {teamView !== 'list' && <>
       {/* =====================================================
+          TASK TABS (ACTIVE VS PAST)
+      ====================================================== */}
+      <div className="flex items-center gap-2 mb-4 border-b border-slate-200 pb-3">
+        <button
+          type="button"
+          onClick={() => {
+            setTaskTab('active');
+            setShowDrafts(false);
+            setFilters((prev: any) => ({ ...prev, status: '' }));
+            void load(showAdminTasks, 'active', false);
+          }}
+          className={`px-4 py-2.5 text-sm font-extrabold rounded-xl transition-all flex items-center gap-2 ${
+            taskTab === 'active' && !showDrafts
+              ? 'bg-navy text-white shadow-sm'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <CheckCircle2 size={16} />
+          Active Tasks
+          <span
+            className={`text-[11px] px-2 py-0.5 rounded-full ${
+              taskTab === 'active' && !showDrafts
+                ? 'bg-white/20 text-white font-bold'
+                : 'bg-slate-100 text-slate-600 font-bold'
+            }`}
+          >
+            {taskTab === 'active' && !showDrafts ? rows.length : ''}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setTaskTab('past');
+            setShowDrafts(false);
+            setFilters((prev: any) => ({ ...prev, status: '' }));
+            void load(showAdminTasks, 'past', false);
+          }}
+          className={`px-4 py-2.5 text-sm font-extrabold rounded-xl transition-all flex items-center gap-2 ${
+            taskTab === 'past' && !showDrafts
+              ? 'bg-navy text-white shadow-sm'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <Clock size={16} />
+          Past Tasks
+          <span
+            className={`text-[11px] px-2 py-0.5 rounded-full ${
+              taskTab === 'past' && !showDrafts
+                ? 'bg-white/20 text-white font-bold'
+                : 'bg-slate-100 text-slate-600 font-bold'
+            }`}
+          >
+            {taskTab === 'past' && !showDrafts ? rows.length : ''}
+          </span>
+        </button>
+      </div>
+
+      {/* =====================================================
           FILTERS
       ====================================================== */}
 
@@ -1043,11 +1113,19 @@ async function toggleReviewHistory(task: any) {
               })
             }
           >
-            <option value="">All status</option>
-            {statuses.filter((s) => s !== 'DRAFT').map((s) => (
-              <option key={s} value={s}>{s}</option>
-            ))}
-            <option value="OVERDUE">OVERDUE</option>
+            <option value="">{taskTab === 'active' ? 'All active statuses' : 'All past tasks'}</option>
+            {taskTab === 'active' ? (
+              <>
+                <option value="PENDING">PENDING</option>
+                <option value="IN_PROGRESS">IN_PROGRESS</option>
+                <option value="BLOCKED">BLOCKED</option>
+                <option value="SUBMITTED">SUBMITTED</option>
+                <option value="NEEDS_CHANGES">NEEDS_CHANGES</option>
+                <option value="OVERDUE">OVERDUE</option>
+              </>
+            ) : (
+              <option value="COMPLETED">COMPLETED</option>
+            )}
           </select>
         )}
 
@@ -1181,6 +1259,9 @@ async function toggleReviewHistory(task: any) {
                   <th className="px-2.5 py-2.5">Status</th>
                   <th className="px-2.5 py-2.5">Start Date</th>
                   <th className="px-2.5 py-2.5">Deadline</th>
+                  {taskTab === 'past' && (
+                    <th className="px-2.5 py-2.5 text-emerald-700">Completed Date</th>
+                  )}
                   <th className="px-2.5 py-2.5">Progress</th>
                   <th className="px-2.5 py-2.5 text-center">Action</th>
                 </tr>
@@ -1246,6 +1327,8 @@ async function toggleReviewHistory(task: any) {
                           className={`badge ${
                             t.display_status === 'OVERDUE'
                               ? '!bg-red-100 !text-red-700'
+                              : t.status === 'COMPLETED'
+                              ? '!bg-emerald-100 !text-emerald-800'
                               : ''
                           }`}
                         >
@@ -1264,6 +1347,14 @@ async function toggleReviewHistory(task: any) {
                           ? new Date(t.due_date).toLocaleString()
                           : '—'}
                       </td>
+
+                      {taskTab === 'past' && (
+                        <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-emerald-700">
+                          {t.completed_at
+                            ? new Date(t.completed_at).toLocaleString()
+                            : '—'}
+                        </td>
+                      )}
 
                       <td className="px-2.5 py-2.5">
                         <div className="min-w-[90px]">

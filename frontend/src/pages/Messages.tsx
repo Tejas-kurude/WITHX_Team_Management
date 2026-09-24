@@ -1,12 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from 'react';
 import { api, messageOf } from '../services/api';
-import { Empty, PageTitle } from '../components/UI';
+import { Empty, PageTitle, Modal } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
 import {
   MessageSquare,
   Search,
   Send,
   User,
+  Users,
   Plus,
   Clock,
   Shield,
@@ -14,24 +15,32 @@ import {
   Building2,
   CheckCheck,
   RefreshCw,
+  UserPlus,
+  Info,
+  Check,
 } from 'lucide-react';
 
 interface Conversation {
   id: number;
+  is_group?: boolean;
+  group_name?: string | null;
+  name?: string | null;
+  group_created_by?: number | null;
+  member_count?: number;
   created_at: string;
   updated_at: string;
   last_message_text: string | null;
   last_message_at: string | null;
   last_read_at: string;
   unread_count: number;
-  other_user_id: number;
-  other_user_code: string;
-  other_user_name: string;
-  other_user_type: string;
-  other_user_job_title: string | null;
-  other_user_photo: string | null;
-  other_user_department: string | null;
-  other_user_role: string;
+  other_user_id?: number | null;
+  other_user_code?: string | null;
+  other_user_name?: string | null;
+  other_user_type?: string | null;
+  other_user_job_title?: string | null;
+  other_user_photo?: string | null;
+  other_user_department?: string | null;
+  other_user_role?: string | null;
 }
 
 interface Message {
@@ -53,9 +62,24 @@ interface SearchUser {
   email: string;
   job_title: string | null;
   user_type: string;
-  profile_photo_url: string | null;
+  photo_url?: string | null;
   department_name: string | null;
   role: string;
+}
+
+interface GroupMember {
+  id: number;
+  employee_code: string;
+  first_name: string;
+  last_name: string;
+  email: string;
+  job_title: string | null;
+  user_type: string;
+  photo_url?: string | null;
+  department_name: string | null;
+  role: string;
+  joined_at: string;
+  is_creator: boolean;
 }
 
 export default function Messages() {
@@ -68,13 +92,28 @@ export default function Messages() {
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [convSearch, setConvSearch] = useState('');
+  const [convTypeFilter, setConvTypeFilter] = useState<'ALL' | 'DIRECT' | 'GROUP'>('ALL');
   const [errorMsg, setErrorMsg] = useState('');
 
-  // New Chat Modal / Search State
+  // New Direct Chat Modal
   const [showNewChatModal, setShowNewChatModal] = useState(false);
   const [userSearchQuery, setUserSearchQuery] = useState('');
   const [userSearchResults, setUserSearchResults] = useState<SearchUser[]>([]);
   const [searchingUsers, setSearchingUsers] = useState(false);
+
+  // New Group Chat Modal
+  const [showNewGroupModal, setShowNewGroupModal] = useState(false);
+  const [groupName, setGroupName] = useState('');
+  const [selectedGroupMemberIds, setSelectedGroupMemberIds] = useState<number[]>([]);
+  const [groupSearchQuery, setGroupSearchQuery] = useState('');
+  const [groupSearchResults, setGroupSearchResults] = useState<SearchUser[]>([]);
+  const [searchingGroupUsers, setSearchingGroupUsers] = useState(false);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+
+  // Group Members Info Modal
+  const [showMembersModal, setShowMembersModal] = useState(false);
+  const [groupMembers, setGroupMembers] = useState<GroupMember[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const pollIntervalRef = useRef<number | null>(null);
@@ -88,7 +127,7 @@ export default function Messages() {
     try {
       if (!silent) setLoadingConvs(true);
       const res = await api.get('/messages/conversations');
-      const data = Array.isArray(res.data) ? res.data : [];
+      const data: Conversation[] = Array.isArray(res.data) ? res.data : [];
       setConversations(data);
 
       // Auto-select first conversation if none selected
@@ -125,7 +164,7 @@ export default function Messages() {
     }
   };
 
-  // Search users for new conversation
+  // Search users for new 1-on-1 conversation
   const searchUsers = async (query: string) => {
     try {
       setSearchingUsers(true);
@@ -137,6 +176,34 @@ export default function Messages() {
       setUserSearchResults([]);
     } finally {
       setSearchingUsers(false);
+    }
+  };
+
+  // Search users for group creation
+  const searchGroupUsers = async (query: string) => {
+    try {
+      setSearchingGroupUsers(true);
+      const res = await api.get('/messages/users/search', {
+        params: { q: query || undefined },
+      });
+      setGroupSearchResults(Array.isArray(res.data) ? res.data : []);
+    } catch (e) {
+      setGroupSearchResults([]);
+    } finally {
+      setSearchingGroupUsers(false);
+    }
+  };
+
+  // Fetch group members
+  const fetchGroupMembers = async (convId: number) => {
+    try {
+      setLoadingMembers(true);
+      const res = await api.get(`/messages/conversations/${convId}/members`);
+      setGroupMembers(Array.isArray(res.data) ? res.data : []);
+    } catch (e) {
+      setGroupMembers([]);
+    } finally {
+      setLoadingMembers(false);
     }
   };
 
@@ -177,6 +244,13 @@ export default function Messages() {
     }
   }, [showNewChatModal, userSearchQuery]);
 
+  // Handle opening group search modal
+  useEffect(() => {
+    if (showNewGroupModal) {
+      void searchGroupUsers(groupSearchQuery);
+    }
+  }, [showNewGroupModal, groupSearchQuery]);
+
   // Send message
   const handleSendMessage = async (e?: FormEvent) => {
     if (e) e.preventDefault();
@@ -204,7 +278,7 @@ export default function Messages() {
     }
   };
 
-  // Start or open conversation with a user
+  // Start or open direct conversation with a user
   const startConversationWithUser = async (targetUserId: number) => {
     try {
       setShowNewChatModal(false);
@@ -222,14 +296,72 @@ export default function Messages() {
     }
   };
 
+  // Create group chat
+  const handleCreateGroup = async (e: FormEvent) => {
+    e.preventDefault();
+    const trimmedName = groupName.trim();
+    if (!trimmedName) {
+      setErrorMsg('Please enter a group name');
+      return;
+    }
+    if (selectedGroupMemberIds.length === 0) {
+      setErrorMsg('Please select at least 1 other team member for the group');
+      return;
+    }
+
+    try {
+      setCreatingGroup(true);
+      setErrorMsg('');
+      const res = await api.post('/messages/groups', {
+        name: trimmedName,
+        memberIds: selectedGroupMemberIds,
+      });
+      const created = res.data;
+      setShowNewGroupModal(false);
+      setGroupName('');
+      setSelectedGroupMemberIds([]);
+      setGroupSearchQuery('');
+
+      await loadConversations(true);
+      if (created?.id) {
+        setActiveConvId(created.id);
+      }
+    } catch (e) {
+      setErrorMsg(messageOf(e));
+    } finally {
+      setCreatingGroup(false);
+    }
+  };
+
+  // Toggle member selection for group
+  const toggleGroupMember = (userId: number) => {
+    setSelectedGroupMemberIds((prev) =>
+      prev.includes(userId)
+        ? prev.filter((id) => id !== userId)
+        : [...prev, userId]
+    );
+  };
+
   const activeConversation = conversations.find((c) => c.id === activeConvId);
 
+  // Filter conversations based on type tab and search keyword
   const filteredConversations = conversations.filter((c) => {
+    // Type tab filter
+    if (convTypeFilter === 'DIRECT' && c.is_group) return false;
+    if (convTypeFilter === 'GROUP' && !c.is_group) return false;
+
+    // Search query filter
     if (!convSearch) return true;
     const term = convSearch.toLowerCase();
+    if (c.is_group) {
+      return (
+        (c.group_name || c.name || '').toLowerCase().includes(term) ||
+        (c.last_message_text && c.last_message_text.toLowerCase().includes(term))
+      );
+    }
     return (
-      c.other_user_name.toLowerCase().includes(term) ||
-      c.other_user_code.toLowerCase().includes(term) ||
+      (c.other_user_name || '').toLowerCase().includes(term) ||
+      (c.other_user_code || '').toLowerCase().includes(term) ||
       (c.other_user_department &&
         c.other_user_department.toLowerCase().includes(term)) ||
       (c.last_message_text &&
@@ -275,16 +407,32 @@ export default function Messages() {
     <>
       <PageTitle
         title="Internal Messages"
-        subtitle="Secure, real-time messaging between employees, team leads, and administration"
+        subtitle="Direct and group messaging between team members, team leads, and administration"
         action={
-          <button
-            type="button"
-            className="btn btn-accent flex items-center gap-2"
-            onClick={() => setShowNewChatModal(true)}
-          >
-            <Plus size={16} />
-            New Conversation
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              className="btn btn-secondary flex items-center gap-2 border-slate-300 bg-white hover:bg-slate-50"
+              onClick={() => {
+                setShowNewGroupModal(true);
+                setGroupName('');
+                setSelectedGroupMemberIds([]);
+                setGroupSearchQuery('');
+              }}
+            >
+              <Users size={16} className="text-orange" />
+              <span>New Group</span>
+            </button>
+
+            <button
+              type="button"
+              className="btn btn-accent flex items-center gap-2"
+              onClick={() => setShowNewChatModal(true)}
+            >
+              <Plus size={16} />
+              <span>New Direct Chat</span>
+            </button>
+          </div>
         }
       />
 
@@ -301,12 +449,12 @@ export default function Messages() {
       )}
 
       {/* Main Messaging Window */}
-      <div className="card overflow-hidden p-0 shadow-lg border border-slate-200 grid grid-cols-1 md:grid-cols-12 min-h-[640px] max-h-[780px]">
+      <div className="card overflow-hidden p-0 shadow-lg border border-slate-200 grid grid-cols-1 md:grid-cols-12 min-h-[640px] max-h-[800px]">
         {/* Left Panel: Conversation List */}
         <div className="md:col-span-4 lg:col-span-4 border-r border-slate-200 bg-white flex flex-col h-full">
           {/* Search Header */}
           <div className="p-4 border-b border-slate-100 bg-[#FAF7F2]">
-            <div className="relative">
+            <div className="relative mb-3">
               <Search
                 size={16}
                 className="absolute left-3.5 top-3 text-slate-400"
@@ -319,24 +467,71 @@ export default function Messages() {
                 onChange={(e) => setConvSearch(e.target.value)}
               />
             </div>
+
+            {/* Conversation Category Filter Tabs */}
+            <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-xl text-xs font-bold">
+              <button
+                type="button"
+                className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
+                  convTypeFilter === 'ALL'
+                    ? 'bg-white text-navy shadow-xs'
+                    : 'text-slate-500 hover:text-navy'
+                }`}
+                onClick={() => setConvTypeFilter('ALL')}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
+                  convTypeFilter === 'DIRECT'
+                    ? 'bg-white text-navy shadow-xs'
+                    : 'text-slate-500 hover:text-navy'
+                }`}
+                onClick={() => setConvTypeFilter('DIRECT')}
+              >
+                Direct
+              </button>
+              <button
+                type="button"
+                className={`flex-1 py-1.5 rounded-lg transition-all text-center ${
+                  convTypeFilter === 'GROUP'
+                    ? 'bg-white text-navy shadow-xs'
+                    : 'text-slate-500 hover:text-navy'
+                }`}
+                onClick={() => setConvTypeFilter('GROUP')}
+              >
+                Groups
+              </button>
+            </div>
           </div>
 
           {/* Conversation Items */}
-          <div className="flex-1 overflow-y-auto divide-y divide-slate-100">
+          <div className="flex-1 overflow-y-auto divide-y divide-slate-100 no-scrollbar">
             {loadingConvs ? (
               <div className="py-12 text-center text-sm font-semibold text-slate-400 flex items-center justify-center gap-2">
-                <RefreshCw size={16} className="animate-spin text-[#18263F]" />
+                <RefreshCw size={16} className="animate-spin text-navy" />
                 Loading conversations...
               </div>
             ) : filteredConversations.length > 0 ? (
               filteredConversations.map((conv) => {
                 const isActive = conv.id === activeConvId;
-                const initials = conv.other_user_name
-                  .split(' ')
-                  .map((n) => n[0])
-                  .join('')
-                  .toUpperCase()
-                  .slice(0, 2);
+                const isGroup = conv.is_group === true;
+                const groupTitle = conv.group_name || conv.name || 'Team Group';
+
+                const initials = isGroup
+                  ? groupTitle
+                      .split(' ')
+                      .map((n) => n[0])
+                      .join('')
+                      .toUpperCase()
+                      .slice(0, 2)
+                  : (conv.other_user_name || 'U')
+                      .split(' ')
+                      .map((n) => n[0])
+                      .join('')
+                      .toUpperCase()
+                      .slice(0, 2);
 
                 return (
                   <button
@@ -345,31 +540,37 @@ export default function Messages() {
                     onClick={() => setActiveConvId(conv.id)}
                     className={`w-full text-left p-4 transition-all flex items-start gap-3 relative ${
                       isActive
-                        ? 'bg-[#F4EFE6] border-l-4 border-l-[#18263F]'
+                        ? 'bg-[#F4EFE6] border-l-4 border-l-navy'
                         : 'hover:bg-slate-50'
                     }`}
                   >
-                    {/* User Avatar */}
+                    {/* User / Group Avatar */}
                     <div className="relative shrink-0">
-                      {conv.other_user_photo ? (
+                      {isGroup ? (
+                        <div className="h-11 w-11 rounded-xl bg-gradient-to-br from-amber-600 to-amber-800 text-white font-extrabold flex items-center justify-center text-sm shadow-sm">
+                          <Users size={20} />
+                        </div>
+                      ) : conv.other_user_photo ? (
                         <img
                           src={conv.other_user_photo}
-                          alt={conv.other_user_name}
+                          alt={conv.other_user_name || 'User'}
                           className="h-11 w-11 rounded-full object-cover border border-slate-200 shadow-sm"
                         />
                       ) : (
-                        <div className="h-11 w-11 rounded-full bg-[#18263F] text-[#D6A94A] font-extrabold flex items-center justify-center text-sm shadow-sm">
+                        <div className="h-11 w-11 rounded-full bg-navy text-orange font-extrabold flex items-center justify-center text-sm shadow-sm">
                           {initials}
                         </div>
                       )}
-                      <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-emerald-500 border-2 border-white" />
+                      {!isGroup && (
+                        <span className="absolute bottom-0 right-0 h-3 w-3 rounded-full bg-emerald-500 border-2 border-white" />
+                      )}
                     </div>
 
                     {/* Meta & Last Message */}
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center justify-between gap-1 mb-0.5">
-                        <span className="font-extrabold text-sm text-[#18263F] truncate">
-                          {conv.other_user_name}
+                        <span className="font-extrabold text-sm text-navy truncate">
+                          {isGroup ? groupTitle : conv.other_user_name}
                         </span>
                         <span className="text-[11px] font-semibold text-slate-400 shrink-0">
                           {formatConvTime(conv.last_message_at || conv.created_at)}
@@ -377,13 +578,22 @@ export default function Messages() {
                       </div>
 
                       <div className="flex items-center gap-1.5 mb-1">
-                        <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded">
-                          {conv.other_user_code}
-                        </span>
-                        {conv.other_user_department && (
-                          <span className="text-[10px] text-slate-400 truncate">
-                            • {conv.other_user_department}
+                        {isGroup ? (
+                          <span className="text-[10px] font-bold text-amber-700 bg-amber-50 border border-amber-200 px-1.5 py-0.2 rounded-md flex items-center gap-1">
+                            <Users size={10} />
+                            {conv.member_count || 2} members
                           </span>
+                        ) : (
+                          <>
+                            <span className="text-[10px] font-bold text-slate-500 bg-slate-100 px-1.5 py-0.2 rounded">
+                              {conv.other_user_code}
+                            </span>
+                            {conv.other_user_department && (
+                              <span className="text-[10px] text-slate-400 truncate">
+                                • {conv.other_user_department}
+                              </span>
+                            )}
+                          </>
                         )}
                       </div>
 
@@ -391,7 +601,7 @@ export default function Messages() {
                         <p
                           className={`text-xs truncate ${
                             conv.unread_count > 0
-                              ? 'font-extrabold text-[#18263F]'
+                              ? 'font-extrabold text-navy'
                               : 'text-slate-500'
                           }`}
                         >
@@ -399,7 +609,7 @@ export default function Messages() {
                         </p>
 
                         {conv.unread_count > 0 && (
-                          <span className="shrink-0 h-5 min-w-[20px] px-1.5 rounded-full bg-[#D6A94A] text-[#171717] font-extrabold text-[10px] flex items-center justify-center shadow-sm">
+                          <span className="shrink-0 h-5 min-w-[20px] px-1.5 rounded-full bg-orange text-white font-extrabold text-[10px] flex items-center justify-center shadow-sm">
                             {conv.unread_count}
                           </span>
                         )}
@@ -411,9 +621,11 @@ export default function Messages() {
             ) : (
               <div className="p-8 text-center text-slate-400">
                 <MessageSquare size={36} className="mx-auto mb-2 opacity-40 text-slate-500" />
-                <p className="text-sm font-semibold">No conversations yet</p>
+                <p className="text-sm font-semibold">No conversations found</p>
                 <p className="text-xs mt-1 text-slate-400">
-                  Click "New Conversation" above to start chatting.
+                  {convTypeFilter === 'GROUP'
+                    ? 'Click "New Group" above to start a team group.'
+                    : 'Click "New Direct Chat" above to start messaging.'}
                 </p>
               </div>
             )}
@@ -428,15 +640,19 @@ export default function Messages() {
               <div className="p-4 bg-white border-b border-slate-200 flex items-center justify-between gap-3 shadow-xs">
                 <div className="flex items-center gap-3 min-w-0">
                   <div className="relative shrink-0">
-                    {activeConversation.other_user_photo ? (
+                    {activeConversation.is_group ? (
+                      <div className="h-10 w-10 rounded-xl bg-gradient-to-br from-amber-600 to-amber-800 text-white font-extrabold flex items-center justify-center text-sm shadow-sm">
+                        <Users size={20} />
+                      </div>
+                    ) : activeConversation.other_user_photo ? (
                       <img
                         src={activeConversation.other_user_photo}
-                        alt={activeConversation.other_user_name}
+                        alt={activeConversation.other_user_name || 'User'}
                         className="h-10 w-10 rounded-full object-cover border border-slate-200"
                       />
                     ) : (
-                      <div className="h-10 w-10 rounded-full bg-[#18263F] text-[#D6A94A] font-extrabold flex items-center justify-center text-sm">
-                        {activeConversation.other_user_name
+                      <div className="h-10 w-10 rounded-full bg-navy text-orange font-extrabold flex items-center justify-center text-sm">
+                        {(activeConversation.other_user_name || 'U')
                           .split(' ')
                           .map((n) => n[0])
                           .join('')
@@ -444,32 +660,54 @@ export default function Messages() {
                           .slice(0, 2)}
                       </div>
                     )}
-                    <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-white" />
+                    {!activeConversation.is_group && (
+                      <span className="absolute bottom-0 right-0 h-2.5 w-2.5 rounded-full bg-emerald-500 border-2 border-white" />
+                    )}
                   </div>
 
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <h3 className="font-extrabold text-sm text-[#18263F] truncate">
-                        {activeConversation.other_user_name}
+                      <h3 className="font-extrabold text-sm text-navy truncate">
+                        {activeConversation.is_group
+                          ? activeConversation.group_name || activeConversation.name || 'Group Chat'
+                          : activeConversation.other_user_name}
                       </h3>
-                      <span
-                        className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border ${getRoleBadgeClass(
-                          activeConversation.other_user_role
-                        )}`}
-                      >
-                        {activeConversation.other_user_role?.replace(/_/g, ' ')}
-                      </span>
+                      {!activeConversation.is_group && (
+                        <span
+                          className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border ${getRoleBadgeClass(
+                            activeConversation.other_user_role || undefined
+                          )}`}
+                        >
+                          {activeConversation.other_user_role?.replace(/_/g, ' ')}
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center gap-2 text-xs text-slate-500 truncate">
-                      <span className="font-semibold text-slate-600">
-                        {activeConversation.other_user_code}
-                      </span>
-                      {activeConversation.other_user_department && (
-                        <span>• {activeConversation.other_user_department}</span>
-                      )}
-                      {activeConversation.other_user_job_title && (
-                        <span>• {activeConversation.other_user_job_title}</span>
+                      {activeConversation.is_group ? (
+                        <button
+                          type="button"
+                          className="text-amber-700 hover:underline font-semibold flex items-center gap-1 cursor-pointer"
+                          onClick={() => {
+                            setShowMembersModal(true);
+                            void fetchGroupMembers(activeConversation.id);
+                          }}
+                        >
+                          <Users size={12} />
+                          <span>{activeConversation.member_count || 2} members • View members</span>
+                        </button>
+                      ) : (
+                        <>
+                          <span className="font-semibold text-slate-600">
+                            {activeConversation.other_user_code}
+                          </span>
+                          {activeConversation.other_user_department && (
+                            <span>• {activeConversation.other_user_department}</span>
+                          )}
+                          {activeConversation.other_user_job_title && (
+                            <span>• {activeConversation.other_user_job_title}</span>
+                          )}
+                        </>
                       )}
                     </div>
                   </div>
@@ -484,7 +722,7 @@ export default function Messages() {
               </div>
 
               {/* Messages Body */}
-              <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3">
+              <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-3 no-scrollbar">
                 {loadingMessages ? (
                   <div className="py-20 text-center text-sm font-semibold text-slate-400">
                     Loading messages...
@@ -503,12 +741,12 @@ export default function Messages() {
                         <div
                           className={`max-w-[80%] md:max-w-[70%] rounded-2xl px-4 py-2.5 shadow-sm ${
                             isMine
-                              ? 'bg-[#18263F] text-white rounded-br-xs'
+                              ? 'bg-navy text-white rounded-br-xs'
                               : 'bg-white text-slate-800 border border-slate-200 rounded-bl-xs'
                           }`}
                         >
                           {!isMine && (
-                            <div className="text-[10px] font-extrabold text-[#B8862C] mb-1">
+                            <div className="text-[10px] font-extrabold text-orange mb-1">
                               {m.sender_name} ({m.sender_code})
                             </div>
                           )}
@@ -523,7 +761,7 @@ export default function Messages() {
                             }`}
                           >
                             <span>{formatMessageTime(m.created_at)}</span>
-                            {isMine && <CheckCheck size={12} className="text-[#D6A94A]" />}
+                            {isMine && <CheckCheck size={12} className="text-orange" />}
                           </div>
                         </div>
                       </div>
@@ -576,29 +814,50 @@ export default function Messages() {
               <div className="h-16 w-16 rounded-full bg-slate-100 flex items-center justify-center text-slate-400 mb-3">
                 <MessageSquare size={32} />
               </div>
-              <h3 className="font-extrabold text-base text-[#18263F]">
+              <h3 className="font-extrabold text-base text-navy">
                 Select a conversation
               </h3>
-              <p className="text-xs text-slate-500 max-w-sm mt-1">
-                Choose an existing chat from the left panel or click "New
-                Conversation" to message a colleague, team lead, or admin.
+              <p className="text-xs text-slate-500 max-w-sm mt-1 mb-4">
+                Choose an existing chat from the left panel or start a new direct or group discussion.
               </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="btn btn-secondary text-xs flex items-center gap-1.5"
+                  onClick={() => setShowNewGroupModal(true)}
+                >
+                  <Users size={14} className="text-orange" />
+                  New Group
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-primary text-xs flex items-center gap-1.5"
+                  onClick={() => setShowNewChatModal(true)}
+                >
+                  <Plus size={14} />
+                  New Direct Chat
+                </button>
+              </div>
             </div>
           )}
         </div>
       </div>
 
-      {/* New Conversation Modal */}
+      {/* New Direct Chat Modal */}
       {showNewChatModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
           <div className="card w-full max-w-lg p-6 bg-white shadow-2xl rounded-2xl animate-in fade-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
               <div>
-                <h3 className="text-lg font-extrabold text-[#18263F]">
-                  Start a New Conversation
+                <h3 className="text-lg font-extrabold text-navy">
+                  Start a Direct Conversation
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Search active colleagues and team members across the organization
+                  {user?.role === 'SUPER_ADMIN' || user?.role === 'ADMIN'
+                    ? 'Search and message any active employee across the organization'
+                    : user?.role === 'TEAM_LEAD'
+                    ? 'Message your team members or assigned admin'
+                    : 'Message your team members or team lead'}
                 </p>
               </div>
               <button
@@ -625,10 +884,10 @@ export default function Messages() {
               />
             </div>
 
-            <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 mb-4 rounded-xl border border-slate-100">
+            <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 mb-4 rounded-xl border border-slate-100 no-scrollbar">
               {searchingUsers ? (
                 <div className="py-8 text-center text-xs font-semibold text-slate-400 flex items-center justify-center gap-2">
-                  <RefreshCw size={14} className="animate-spin text-[#18263F]" />
+                  <RefreshCw size={14} className="animate-spin text-navy" />
                   Searching employees...
                 </div>
               ) : userSearchResults.length > 0 ? (
@@ -640,12 +899,12 @@ export default function Messages() {
                     className="w-full text-left p-3 hover:bg-slate-50 flex items-center justify-between gap-3 transition-colors"
                   >
                     <div className="flex items-center gap-3 min-w-0">
-                      <div className="h-9 w-9 rounded-full bg-[#18263F] text-[#D6A94A] font-extrabold flex items-center justify-center text-xs shrink-0">
+                      <div className="h-9 w-9 rounded-full bg-navy text-orange font-extrabold flex items-center justify-center text-xs shrink-0">
                         {usr.first_name[0]}
                         {usr.last_name[0]}
                       </div>
                       <div className="min-w-0">
-                        <div className="font-extrabold text-sm text-[#18263F] truncate">
+                        <div className="font-extrabold text-sm text-navy truncate">
                           {usr.first_name} {usr.last_name}
                         </div>
                         <div className="text-[11px] text-slate-500 truncate flex items-center gap-2">
@@ -685,6 +944,217 @@ export default function Messages() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* New Group Chat Modal */}
+      {showNewGroupModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4 backdrop-blur-xs">
+          <form
+            onSubmit={handleCreateGroup}
+            className="card w-full max-w-lg p-6 bg-white shadow-2xl rounded-2xl animate-in fade-in zoom-in-95 duration-150"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-4 mb-4">
+              <div>
+                <h3 className="text-lg font-extrabold text-navy flex items-center gap-2">
+                  <Users size={18} className="text-orange" />
+                  <span>Create Group Chat</span>
+                </h3>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Set a group title and select members to include in the conversation
+                </p>
+              </div>
+              <button
+                type="button"
+                className="text-slate-400 hover:text-slate-600 font-extrabold text-lg"
+                onClick={() => setShowNewGroupModal(false)}
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Group Name Input */}
+            <div className="mb-4">
+              <label className="label mb-1.5 block">Group Name</label>
+              <input
+                type="text"
+                className="input w-full"
+                placeholder="e.g. Development Team, Project Alpha..."
+                value={groupName}
+                onChange={(e) => setGroupName(e.target.value)}
+                required
+                autoFocus
+              />
+            </div>
+
+            {/* Member Search */}
+            <div className="mb-2">
+              <label className="label mb-1.5 flex items-center justify-between">
+                <span>Add Members</span>
+                <span className="text-xs font-bold text-orange">
+                  {selectedGroupMemberIds.length} selected
+                </span>
+              </label>
+
+              <div className="relative mb-2">
+                <Search
+                  size={16}
+                  className="absolute left-3.5 top-3 text-slate-400"
+                />
+                <input
+                  type="text"
+                  className="input pl-10 pr-4 py-2 text-sm w-full rounded-xl"
+                  placeholder="Search colleagues to add..."
+                  value={groupSearchQuery}
+                  onChange={(e) => setGroupSearchQuery(e.target.value)}
+                />
+              </div>
+            </div>
+
+            {/* Member Checkbox List */}
+            <div className="max-h-52 overflow-y-auto divide-y divide-slate-100 mb-4 rounded-xl border border-slate-200 no-scrollbar">
+              {searchingGroupUsers ? (
+                <div className="py-6 text-center text-xs font-semibold text-slate-400 flex items-center justify-center gap-2">
+                  <RefreshCw size={14} className="animate-spin text-navy" />
+                  Searching employees...
+                </div>
+              ) : groupSearchResults.length > 0 ? (
+                groupSearchResults.map((usr) => {
+                  const isSelected = selectedGroupMemberIds.includes(usr.id);
+
+                  return (
+                    <label
+                      key={usr.id}
+                      className={`p-3 flex items-center justify-between gap-3 cursor-pointer transition-colors ${
+                        isSelected ? 'bg-amber-50/70' : 'hover:bg-slate-50'
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <input
+                          type="checkbox"
+                          checked={isSelected}
+                          onChange={() => toggleGroupMember(usr.id)}
+                          className="h-4 w-4 rounded text-orange focus:ring-orange cursor-pointer"
+                        />
+                        <div className="min-w-0">
+                          <div className="font-extrabold text-sm text-navy truncate">
+                            {usr.first_name} {usr.last_name}
+                          </div>
+                          <div className="text-[11px] text-slate-500 truncate flex items-center gap-1.5">
+                            <span className="font-bold">{usr.employee_code}</span>
+                            {usr.department_name && (
+                              <span>• {usr.department_name}</span>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+
+                      <span
+                        className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border shrink-0 ${getRoleBadgeClass(
+                          usr.role
+                        )}`}
+                      >
+                        {usr.role?.replace(/_/g, ' ')}
+                      </span>
+                    </label>
+                  );
+                })
+              ) : (
+                <div className="py-6 text-center text-xs text-slate-400">
+                  No colleagues found matching your search.
+                </div>
+              )}
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+              <button
+                type="button"
+                className="btn btn-secondary text-xs"
+                onClick={() => setShowNewGroupModal(false)}
+                disabled={creatingGroup}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={creatingGroup || !groupName.trim() || selectedGroupMemberIds.length === 0}
+                className="btn btn-primary text-xs flex items-center gap-2"
+              >
+                {creatingGroup ? (
+                  <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white/40 border-t-white" />
+                ) : (
+                  <Users size={14} />
+                )}
+                <span>Create Group</span>
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* Group Members Modal */}
+      {showMembersModal && (
+        <Modal
+          title="Group Participants"
+          onClose={() => setShowMembersModal(false)}
+        >
+          <div className="space-y-3">
+            {loadingMembers ? (
+              <div className="py-8 text-center text-xs font-semibold text-slate-400 flex items-center justify-center gap-2">
+                <RefreshCw size={14} className="animate-spin text-navy" />
+                Loading group members...
+              </div>
+            ) : groupMembers.length > 0 ? (
+              <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 rounded-xl border border-slate-100 no-scrollbar">
+                {groupMembers.map((m) => (
+                  <div key={m.id} className="p-3 flex items-center justify-between gap-3">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <div className="h-8 w-8 rounded-full bg-navy text-orange font-extrabold flex items-center justify-center text-xs shrink-0">
+                        {m.first_name[0]}
+                        {m.last_name[0]}
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-extrabold text-sm text-navy truncate flex items-center gap-2">
+                          <span>{m.first_name} {m.last_name}</span>
+                          {m.is_creator && (
+                            <span className="text-[9px] bg-amber-100 text-amber-800 font-extrabold px-1.5 py-0.2 rounded border border-amber-300">
+                              Admin / Creator
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 truncate">
+                          {m.employee_code} {m.department_name ? `• ${m.department_name}` : ''}
+                        </div>
+                      </div>
+                    </div>
+
+                    <span
+                      className={`text-[9px] font-extrabold px-2 py-0.5 rounded-full border shrink-0 ${getRoleBadgeClass(
+                        m.role
+                      )}`}
+                    >
+                      {m.role?.replace(/_/g, ' ')}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="py-6 text-center text-xs text-slate-400">
+                No member details available.
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                className="btn btn-secondary text-xs"
+                onClick={() => setShowMembersModal(false)}
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </Modal>
       )}
     </>
   );

@@ -16,6 +16,7 @@ import Settings from './pages/Settings';
 import Analytics from './pages/Analytics';
 import Profile from './pages/Profile';
 import Messages from './pages/Messages';
+import Notepad from './pages/Notepad';
 import WorkHours from './pages/WorkHours';
 import Legal from './pages/Legal';
 
@@ -33,6 +34,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/profile" element={<Profile />} />
           <Route path="/messages" element={<Messages />} />
+          <Route path="/notepad" element={<Notepad />} />
           <Route path="/employees" element={<Employees />} />
           <Route path="/departments" element={<Departments />} />
           <Route path="/attendance" element={<Attendance />} />

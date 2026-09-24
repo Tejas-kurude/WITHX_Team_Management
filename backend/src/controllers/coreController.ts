@@ -659,7 +659,7 @@ function buildTaskEditChanges(before: any, after: any) {
 
 export async function listTasks(req: Request, res: Response) {
   await syncDeadlineNotifications(req.user!.role === 'EMPLOYEE' ? req.user!.employeeId : null);
-  const { search = '', status = '', priority = '', department = '', employeeId = '', teamLeadId = '', date = '' } = req.query as any;
+  const { search = '', status = '', statusGroup = '', priority = '', department = '', employeeId = '', teamLeadId = '', date = '' } = req.query as any;
   const p: any[] = []; let w = 'WHERE 1=1';
   if (req.user!.role === 'EMPLOYEE') { p.push(req.user!.employeeId); w += ` AND t.assigned_to=$${p.length}`; }
   else if (req.user!.role === 'TEAM_LEAD') { p.push(req.user!.employeeId); w += ` AND (t.assigned_to=$${p.length} OR e.team_lead_id=$${p.length})`; }
@@ -683,9 +683,16 @@ export async function listTasks(req: Request, res: Response) {
     w += ` AND t.status <> 'DRAFT'`;
   }
 
+  // Active vs Past tasks segmentation
+  if (statusGroup === 'past') {
+    w += ` AND t.status = 'COMPLETED'`;
+  } else if (statusGroup === 'active' && !status) {
+    w += ` AND t.status NOT IN ('COMPLETED', 'DRAFT')`;
+  }
+
   if (status) {
     if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT')`;
-    else { p.push(status); w += ` AND t.status=$${p.length}`; }
+    else if (status !== 'DRAFT') { p.push(status); w += ` AND t.status=$${p.length}`; }
   }
   if (priority) { p.push(priority); w += ` AND t.priority=$${p.length}`; }
   if (department) { p.push(Number(department)); w += ` AND e.department_id=$${p.length}`; }
@@ -1126,8 +1133,9 @@ CASE
 
   ${w}
 
-  ORDER BY
-    GREATEST(t.created_at, COALESCE(latest_edit.edited_at, t.created_at)) DESC
+  ${(statusGroup === 'past' || status === 'COMPLETED')
+    ? 'ORDER BY COALESCE(t.completed_at, t.updated_at, t.created_at) DESC, t.id DESC'
+    : 'ORDER BY GREATEST(t.created_at, COALESCE(latest_edit.edited_at, t.created_at)) DESC, t.id DESC'}
   `,
 
   [
@@ -1140,7 +1148,21 @@ CASE
 res.json(r.rows);
 }
 export async function createTask(req: Request, res: Response) {
-  const { title, description, assignmentType = 'INDIVIDUAL', assignedTo, assignedToIds, teamLeadId, departmentId, priority = 'MEDIUM', startDate, dueDate, attachmentUrl, taskType = 'TECHNICAL', saveAsDraft = false } = req.body;
+  const {
+    title,
+    description,
+    assignmentType = 'INDIVIDUAL',
+    assignedTo = req.body.assigned_to,
+    assignedToIds = req.body.assigned_to_ids,
+    teamLeadId = req.body.team_lead_id,
+    departmentId = req.body.department_id,
+    priority = 'MEDIUM',
+    startDate = req.body.start_date,
+    dueDate = req.body.due_date,
+    attachmentUrl = req.body.attachment_url,
+    taskType = req.body.task_type || 'TECHNICAL',
+    saveAsDraft = false
+  } = req.body;
   const draft = String(saveAsDraft).toLowerCase() === 'true' || saveAsDraft === true;
 if (!draft && (!title || !String(title).trim())) {
   return res.status(400).json({
@@ -5675,6 +5697,9 @@ export async function listConversations(req: Request, res: Response) {
   const r = await query<any>(`
     SELECT
       c.id,
+      c.is_group,
+      c.name AS group_name,
+      c.created_by AS group_created_by,
       c.created_at,
       c.updated_at,
       c.last_message_text,
@@ -5687,6 +5712,11 @@ export async function listConversations(req: Request, res: Response) {
           AND m.sender_id <> $1
           AND m.created_at > cp.last_read_at
       ) AS unread_count,
+      (
+        SELECT count(*)::int
+        FROM conversation_participants
+        WHERE conversation_id = c.id
+      ) AS member_count,
       other.id AS other_user_id,
       other.employee_code AS other_user_code,
       other.first_name || ' ' || other.last_name AS other_user_name,
@@ -5699,10 +5729,11 @@ export async function listConversations(req: Request, res: Response) {
     JOIN conversation_participants cp
       ON cp.conversation_id = c.id
      AND cp.employee_id = $1
-    JOIN conversation_participants cp_other
+    LEFT JOIN conversation_participants cp_other
       ON cp_other.conversation_id = c.id
      AND cp_other.employee_id <> $1
-    JOIN employees other
+     AND c.is_group = false
+    LEFT JOIN employees other
       ON other.id = cp_other.employee_id
     LEFT JOIN users u
       ON u.employee_id = other.id
@@ -5724,13 +5755,18 @@ export async function createOrGetConversation(req: Request, res: Response) {
   }
 
   // Check if recipient exists and is active
-  const recCheck = await query<any>(
-    'SELECT id, first_name, last_name FROM employees WHERE id=$1 AND status <> $2',
-    [recipientId, 'INACTIVE']
-  );
+  const recCheck = await query<any>(`
+    SELECT e.id, e.first_name, e.last_name, e.team_lead_id, e.admin_id, u.role
+    FROM employees e
+    LEFT JOIN users u ON u.employee_id = e.id
+    WHERE e.id=$1 AND e.status <> 'INACTIVE'
+  `, [recipientId]);
+
   if (!recCheck.rows[0]) {
-    return res.status(404).json({ message: 'Recipient employee not found.' });
+    return res.status(404).json({ message: 'Recipient employee not found or inactive.' });
   }
+
+  const recipient = recCheck.rows[0];
 
   // Look for existing 1-on-1 conversation
   const existing = await query<any>(`
@@ -5738,6 +5774,7 @@ export async function createOrGetConversation(req: Request, res: Response) {
     FROM conversations c
     JOIN conversation_participants p1 ON p1.conversation_id = c.id AND p1.employee_id = $1
     JOIN conversation_participants p2 ON p2.conversation_id = c.id AND p2.employee_id = $2
+    WHERE COALESCE(c.is_group, false) = false
     LIMIT 1
   `, [me, recipientId]);
 
@@ -5746,6 +5783,44 @@ export async function createOrGetConversation(req: Request, res: Response) {
   if (existing.rows[0]) {
     conversationId = Number(existing.rows[0].id);
   } else {
+    // Check role-based permission boundaries for initiating a new conversation
+    const senderRole = req.user!.role;
+    const meEmpRes = await query<any>(
+      'SELECT id, team_lead_id, admin_id FROM employees WHERE id = $1',
+      [me]
+    );
+    const meEmp = meEmpRes.rows[0];
+
+    let isAllowed = false;
+
+    if (senderRole === 'SUPER_ADMIN' || senderRole === 'ADMIN') {
+      // Admin and Super Admin can message all employees
+      isAllowed = true;
+    } else if (senderRole === 'TEAM_LEAD') {
+      // Team lead can message its team members, the admin assigned to it, and Super Admin
+      if (
+        recipient.team_lead_id === me ||
+        (meEmp?.admin_id && recipient.id === meEmp.admin_id) ||
+        recipient.role === 'SUPER_ADMIN'
+      ) {
+        isAllowed = true;
+      }
+    } else {
+      // Members of a team (EMPLOYEE / INTERN)
+      // Can message peers in the same team, their team lead, and Super Admin
+      if (
+        (meEmp?.team_lead_id && recipient.team_lead_id === meEmp.team_lead_id) ||
+        (meEmp?.team_lead_id && recipient.id === meEmp.team_lead_id) ||
+        recipient.role === 'SUPER_ADMIN'
+      ) {
+        isAllowed = true;
+      }
+    }
+
+    if (!isAllowed) {
+      return res.status(403).json({ message: 'You do not have permission to start a conversation with this employee.' });
+    }
+
     const created = await query<any>(
       `INSERT INTO conversations(created_at, updated_at) VALUES(now(), now()) RETURNING id`
     );
@@ -5766,6 +5841,9 @@ export async function createOrGetConversation(req: Request, res: Response) {
       c.updated_at,
       c.last_message_text,
       c.last_message_at,
+      COALESCE(c.is_group, false) AS is_group,
+      c.name,
+      c.created_by,
       cp.last_read_at,
       (
         SELECT count(*)::int
@@ -5916,19 +5994,55 @@ export async function markConversationRead(req: Request, res: Response) {
 
 export async function searchUsersForMessaging(req: Request, res: Response) {
   const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+
+  const senderRole = req.user?.role;
   const search = String(req.query.q || '').trim();
 
-  const p: any[] = [];
-  let w = `WHERE e.status = 'ACTIVE'`;
+  // Fetch sender's team_lead_id and admin_id
+  const meEmpRes = await query<any>(
+    'SELECT id, team_lead_id, admin_id FROM employees WHERE id = $1',
+    [me]
+  );
+  const meEmp = meEmpRes.rows[0];
+  const myTeamLeadId = meEmp?.team_lead_id || null;
+  const myAdminId = meEmp?.admin_id || null;
 
-  if (me) {
+  const p: any[] = [me];
+  let w = `WHERE e.status = 'ACTIVE' AND e.id <> $1`;
+
+  if (senderRole === 'SUPER_ADMIN' || senderRole === 'ADMIN') {
+    // Admin and Super Admin can message all employees across the organization
+  } else if (senderRole === 'TEAM_LEAD') {
+    // Team lead can message its team members, the admin assigned to it, and Super Admin
     p.push(me);
-    w += ` AND e.id <> $${p.length}`;
+    const tlConds: string[] = [`e.team_lead_id = $${p.length}`];
+
+    if (myAdminId) {
+      p.push(myAdminId);
+      tlConds.push(`e.id = $${p.length}`);
+    }
+    tlConds.push(`u.role = 'SUPER_ADMIN'`);
+
+    w += ` AND (${tlConds.join(' OR ')})`;
+  } else {
+    // Members of a team (EMPLOYEE / INTERN)
+    // Can message peers in the same team, their team lead, and Super Admin
+    const empConds: string[] = [];
+    if (myTeamLeadId) {
+      p.push(myTeamLeadId);
+      empConds.push(`e.team_lead_id = $${p.length}`);
+      empConds.push(`e.id = $${p.length}`);
+    }
+    empConds.push(`u.role = 'SUPER_ADMIN'`);
+
+    w += ` AND (${empConds.join(' OR ')})`;
   }
 
   if (search) {
     p.push(`%${search}%`);
-    w += ` AND (e.first_name ILIKE $${p.length} OR e.last_name ILIKE $${p.length} OR e.employee_code ILIKE $${p.length} OR e.email ILIKE $${p.length} OR COALESCE(d.name,'') ILIKE $${p.length} OR COALESCE(e.job_title,'') ILIKE $${p.length})`;
+    const sIdx = p.length;
+    w += ` AND (e.first_name ILIKE $${sIdx} OR e.last_name ILIKE $${sIdx} OR e.employee_code ILIKE $${sIdx} OR e.email ILIKE $${sIdx} OR COALESCE(d.name,'') ILIKE $${sIdx} OR COALESCE(e.job_title,'') ILIKE $${sIdx})`;
   }
 
   const r = await query<any>(`
@@ -5953,4 +6067,278 @@ export async function searchUsersForMessaging(req: Request, res: Response) {
 
   res.json(r.rows);
 }
+
+export async function createGroupConversation(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+  const name = String(req.body.name || req.body.groupName || '').trim();
+  if (!name) return res.status(400).json({ message: 'Group name is required' });
+  if (name.length > 255) return res.status(400).json({ message: 'Group name is too long (max 255 chars)' });
+
+  const rawMemberIds: number[] = Array.isArray(req.body.memberIds)
+    ? req.body.memberIds.map(Number).filter((id: number) => !isNaN(id) && id > 0)
+    : [];
+
+  const memberIds = Array.from(new Set([me, ...rawMemberIds]));
+
+  if (memberIds.length < 2) {
+    return res.status(400).json({ message: 'Please select at least 1 other team member for the group.' });
+  }
+
+  // Verify all members exist and are active
+  const activeMembers = await query<any>(
+    `SELECT id FROM employees WHERE id = ANY($1) AND status <> 'INACTIVE'`,
+    [memberIds]
+  );
+  const validIds = activeMembers.rows.map((r) => Number(r.id));
+  if (validIds.length < 2 || !validIds.includes(me)) {
+    return res.status(400).json({ message: 'One or more selected members are invalid or inactive.' });
+  }
+
+  const convRes = await query<any>(
+    `INSERT INTO conversations(is_group, name, created_by, created_at, updated_at)
+     VALUES(true, $1, $2, now(), now())
+     RETURNING id, is_group, name, created_by, created_at, updated_at`,
+    [name, me]
+  );
+  const convId = Number(convRes.rows[0].id);
+
+  for (const empId of validIds) {
+    await query(
+      `INSERT INTO conversation_participants(conversation_id, employee_id, last_read_at, created_at)
+       VALUES($1, $2, now(), now())
+       ON CONFLICT(conversation_id, employee_id) DO NOTHING`,
+      [convId, empId]
+    );
+  }
+
+  res.status(201).json({
+    id: convId,
+    is_group: true,
+    group_name: name,
+    name,
+    group_created_by: me,
+    member_count: validIds.length,
+    unread_count: 0,
+    created_at: convRes.rows[0].created_at,
+    updated_at: convRes.rows[0].updated_at
+  });
+}
+
+export async function getConversationMembers(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+  const conversationId = Number(req.params.id);
+  if (!conversationId) return res.status(400).json({ message: 'Invalid conversation ID' });
+
+  // Verify participant
+  const part = await query<any>(
+    'SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND employee_id = $2',
+    [conversationId, me]
+  );
+  if (!part.rows[0]) {
+    return res.status(403).json({ message: 'You are not a participant in this conversation.' });
+  }
+
+  const r = await query<any>(`
+    SELECT
+      e.id,
+      e.employee_code,
+      e.first_name,
+      e.last_name,
+      e.email,
+      e.job_title,
+      e.user_type,
+      COALESCE(e.photo_url, '') AS photo_url,
+      d.name AS department_name,
+      u.role,
+      cp.created_at AS joined_at,
+      (c.created_by = e.id) AS is_creator
+    FROM conversation_participants cp
+    JOIN employees e ON e.id = cp.employee_id
+    JOIN conversations c ON c.id = cp.conversation_id
+    LEFT JOIN users u ON u.employee_id = e.id
+    LEFT JOIN departments d ON d.id = e.department_id
+    WHERE cp.conversation_id = $1
+    ORDER BY (c.created_by = e.id) DESC, e.first_name ASC, e.last_name ASC
+  `, [conversationId]);
+
+  res.json(r.rows);
+}
+
+export async function addConversationMember(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+  const conversationId = Number(req.params.id);
+  const employeeId = Number(req.body.employeeId || req.body.memberId);
+  if (!conversationId || !employeeId) {
+    return res.status(400).json({ message: 'Conversation ID and Employee ID required.' });
+  }
+
+  const conv = await query<any>(
+    'SELECT id, is_group, created_by FROM conversations WHERE id = $1',
+    [conversationId]
+  );
+  if (!conv.rows[0]) return res.status(404).json({ message: 'Conversation not found.' });
+  if (!conv.rows[0].is_group) return res.status(400).json({ message: 'Cannot add members to a direct message.' });
+
+  const part = await query<any>(
+    'SELECT 1 FROM conversation_participants WHERE conversation_id = $1 AND employee_id = $2',
+    [conversationId, me]
+  );
+  if (!part.rows[0]) return res.status(403).json({ message: 'You are not a member of this group.' });
+
+  await query(
+    `INSERT INTO conversation_participants(conversation_id, employee_id, last_read_at, created_at)
+     VALUES($1, $2, now(), now())
+     ON CONFLICT(conversation_id, employee_id) DO NOTHING`,
+    [conversationId, employeeId]
+  );
+
+  res.json({ ok: true, conversationId, employeeId });
+}
+
+export async function removeConversationMember(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+  const conversationId = Number(req.params.id);
+  const memberId = Number(req.params.memberId);
+  if (!conversationId || !memberId) {
+    return res.status(400).json({ message: 'Conversation ID and Member ID required.' });
+  }
+
+  const conv = await query<any>(
+    'SELECT id, is_group, created_by FROM conversations WHERE id = $1',
+    [conversationId]
+  );
+  if (!conv.rows[0]) return res.status(404).json({ message: 'Conversation not found.' });
+  if (!conv.rows[0].is_group) return res.status(400).json({ message: 'Cannot remove members from a direct message.' });
+
+  const isCreator = conv.rows[0].created_by === me;
+  const isAdmin = ['SUPER_ADMIN', 'ADMIN'].includes(req.user?.role || '');
+  const isSelf = memberId === me;
+
+  if (!isCreator && !isAdmin && !isSelf) {
+    return res.status(403).json({ message: 'You do not have permission to remove this member.' });
+  }
+
+  await query(
+    'DELETE FROM conversation_participants WHERE conversation_id = $1 AND employee_id = $2',
+    [conversationId, memberId]
+  );
+
+  res.json({ ok: true, conversationId, memberId });
+}
+
+export async function leaveGroupConversation(req: Request, res: Response) {
+  const me = req.user?.employeeId;
+  if (!me) return res.status(400).json({ message: 'Employee profile required' });
+  const conversationId = Number(req.params.id);
+  if (!conversationId) return res.status(400).json({ message: 'Invalid conversation ID' });
+
+  await query(
+    'DELETE FROM conversation_participants WHERE conversation_id = $1 AND employee_id = $2',
+    [conversationId, me]
+  );
+
+  res.json({ ok: true, conversationId });
+}
+
+/* =========================================================
+   NOTEPAD / PERSONAL NOTES SYSTEM
+   ========================================================= */
+
+export async function listNotes(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+  const search = String(req.query.q || req.query.search || '').trim();
+  let q = `SELECT id, user_id, title, content, created_at, updated_at FROM notes WHERE user_id = $1`;
+  const p: any[] = [userId];
+
+  if (search) {
+    p.push(`%${search}%`);
+    q += ` AND (title ILIKE $2 OR content ILIKE $2)`;
+  }
+
+  q += ` ORDER BY updated_at DESC, id DESC`;
+  const r = await query<any>(q, p);
+  res.json(r.rows);
+}
+
+export async function getNote(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+  const noteId = Number(req.params.id);
+  if (!noteId) return res.status(400).json({ message: 'Invalid note ID' });
+
+  const r = await query<any>(
+    'SELECT id, user_id, title, content, created_at, updated_at FROM notes WHERE id = $1 AND user_id = $2',
+    [noteId, userId]
+  );
+  if (!r.rows[0]) return res.status(404).json({ message: 'Note not found' });
+  res.json(r.rows[0]);
+}
+
+export async function createNote(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+  const title = String(req.body.title || 'Untitled Note').trim().slice(0, 255) || 'Untitled Note';
+  const content = String(req.body.content || '');
+
+  const r = await query<any>(
+    `INSERT INTO notes(user_id, title, content, created_at, updated_at)
+     VALUES($1, $2, $3, now(), now())
+     RETURNING id, user_id, title, content, created_at, updated_at`,
+    [userId, title, content]
+  );
+  res.status(201).json(r.rows[0]);
+}
+
+export async function updateNote(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+  const noteId = Number(req.params.id);
+  if (!noteId) return res.status(400).json({ message: 'Invalid note ID' });
+
+  const existing = await query<any>(
+    'SELECT id FROM notes WHERE id = $1 AND user_id = $2',
+    [noteId, userId]
+  );
+  if (!existing.rows[0]) return res.status(404).json({ message: 'Note not found' });
+
+  const title = req.body.title !== undefined ? String(req.body.title).trim().slice(0, 255) : null;
+  const content = req.body.content !== undefined ? String(req.body.content) : null;
+
+  const r = await query<any>(
+    `UPDATE notes
+     SET title = COALESCE($1, title),
+         content = COALESCE($2, content),
+         updated_at = now()
+     WHERE id = $3 AND user_id = $4
+     RETURNING id, user_id, title, content, created_at, updated_at`,
+    [title, content, noteId, userId]
+  );
+  res.json(r.rows[0]);
+}
+
+export async function deleteNote(req: Request, res: Response) {
+  const userId = req.user?.userId;
+  if (!userId) return res.status(401).json({ message: 'Authentication required' });
+
+  const noteId = Number(req.params.id);
+  if (!noteId) return res.status(400).json({ message: 'Invalid note ID' });
+
+  const r = await query<any>(
+    'DELETE FROM notes WHERE id = $1 AND user_id = $2 RETURNING id',
+    [noteId, userId]
+  );
+  if (!r.rows[0]) return res.status(404).json({ message: 'Note not found' });
+  res.json({ ok: true, id: noteId });
+}
+
+
 

@@ -1,6 +1,6 @@
 import { NavLink, Outlet } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
-import { LayoutDashboard, Users, Building2, CalendarCheck, ClipboardList, FileText, Star, Bell, Activity, Settings, LogOut, BarChart3, Palmtree, Menu, X, UserCircle, Clock, Scale, MessageSquare } from 'lucide-react';
+import { LayoutDashboard, Users, Building2, CalendarCheck, ClipboardList, FileText, Star, Bell, Activity, Settings, LogOut, BarChart3, Palmtree, Menu, X, UserCircle, Clock, Scale, MessageSquare, StickyNote } from 'lucide-react';
 import { useState } from 'react';
 
 export default function AppLayout() {
@@ -10,6 +10,7 @@ export default function AppLayout() {
     ['Dashboard', '/', LayoutDashboard],
     ['My Profile', '/profile', UserCircle],
     ['Messages', '/messages', MessageSquare],
+    ['Notepad', '/notepad', StickyNote],
     ['Employees', '/employees', Users],
     ['Departments', '/departments', Building2],
     ['Attendance', '/attendance', CalendarCheck],
@@ -39,7 +40,7 @@ export default function AppLayout() {
           <div className="sr-only">WITHX Management Platform</div>
           <button className="ml-auto lg:hidden" onClick={() => setOpen(false)}><X size={20} /></button>
         </div>
-        <nav className="flex-1 min-h-0 overflow-y-auto p-3 space-y-1">
+        <nav className="flex-1 min-h-0 overflow-y-auto no-scrollbar p-3 space-y-1">
           {nav.filter(x => visible(x[0])).map(([name, to, Icon]) => (
             <NavLink end={to === '/'} to={to} key={name} onClick={() => setOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition ${isActive ? 'bg-orange text-white shadow-sm' : 'text-white/75 hover:bg-white/10 hover:text-white'}`}>
               <Icon size={18} className="shrink-0" />
