@@ -1295,128 +1295,7 @@ export default function Performance() {
         <Empty>No performance scores calculated yet.</Empty>
       )}
 
-      {/* Attendance Deductions Breakdown Section */}
-      <div className="card mt-10 mb-5 overflow-hidden p-0">
-        <div className="border-b border-slate-200 bg-gradient-to-r from-white via-rose-50/40 to-white p-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="text-xl font-extrabold text-black">
-                Attendance Deductions Breakdown
-              </h2>
-              <p className="mt-1 text-sm text-slate-600">
-                Detailed record of all attendance deductions (Absence, Half Day, Missing Hours, Unpaid Leave) for {monthName}
-              </p>
-            </div>
-            <div className="flex flex-wrap items-center gap-3">
-              {user?.role !== 'EMPLOYEE' && (
-                <div className="flex items-center gap-2">
-                  <label className="text-xs font-bold text-slate-600">Employee:</label>
-                  <select
-                    className="input !py-1.5 !px-3 text-xs font-bold max-w-[200px]"
-                    value={deductionEmployee || target}
-                    onChange={(e) => setDeductionEmployee(e.target.value)}
-                  >
-                    <option value="">All Accessible</option>
-                    {emps.map((e) => (
-                      <option key={e.id} value={String(e.id)}>
-                        {e.first_name} {e.last_name} ({e.employee_code})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              <div className="flex items-center gap-2">
-                <label className="text-xs font-bold text-slate-600">Type:</label>
-                <select
-                  className="input !py-1.5 !px-3 text-xs font-bold"
-                  value={deductionFilter}
-                  onChange={(e) => setDeductionFilter(e.target.value as any)}
-                >
-                  <option value="All">All Deductions</option>
-                  <option value="Absent">Absent</option>
-                  <option value="Half Day">Half Day</option>
-                  <option value="Partial">Partial</option>
-                  <option value="Unpaid Leave">Unpaid Leave</option>
-                </select>
-              </div>
-              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-extrabold text-rose-800 shadow-sm">
-                Total Items: {filteredDeductionItems.length}
-              </div>
-              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-extrabold text-red-800 shadow-sm">
-                Total Deduction: {filteredDeductionItems.reduce((sum, item) => sum + item.deduction_percentage, 0).toFixed(2)}%
-              </div>
-            </div>
-          </div>
-        </div>
 
-        <div className="p-5">
-          {filteredDeductionItems.length > 0 ? (
-            <div className="table-wrap">
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>Date</th>
-                    {user?.role !== 'EMPLOYEE' && <th>Employee</th>}
-                    <th>Attendance Status</th>
-                    <th>Required</th>
-                    <th>Worked</th>
-                    <th>Missing</th>
-                    <th>Deduction Type</th>
-                    <th>Deduction %</th>
-                    <th>Reason</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredDeductionItems.map((item, idx) => (
-                    <tr key={`${item.employee_id}-${item.date}-${idx}`}>
-                      <td className="font-bold">{item.date}</td>
-                      {user?.role !== 'EMPLOYEE' && (
-                        <td>
-                          <b>{item.employee_name}</b>
-                          <div className="text-xs muted">{item.employee_code}</div>
-                        </td>
-                      )}
-                      <td>
-                        <span
-                          className={`badge font-extrabold ${
-                            item.normalized_category === 'Absent'
-                              ? 'border border-red-200 bg-red-50 text-red-700'
-                              : item.normalized_category === 'Half Day'
-                              ? 'border border-amber-200 bg-amber-50 text-amber-800'
-                              : item.normalized_category === 'Unpaid Leave'
-                              ? 'border border-blue-200 bg-blue-50 text-blue-700'
-                              : 'border border-orange-200 bg-orange-50 text-orange-800'
-                          }`}
-                        >
-                          {item.status}
-                        </span>
-                      </td>
-                      <td>{formatMinutes(item.required_minutes)}</td>
-                      <td>{formatMinutes(item.worked_minutes)}</td>
-                      <td className="font-extrabold text-red-600">
-                        {formatMinutes(item.missing_minutes)}
-                      </td>
-                      <td>
-                        <span className="badge border border-amber-200 bg-amber-50 text-amber-800 font-bold">
-                          {item.deduction_type}
-                        </span>
-                      </td>
-                      <td className="font-extrabold text-red-700 text-sm">
-                        {item.deduction_percentage.toFixed(2)}%
-                      </td>
-                      <td className="text-xs text-slate-600 max-w-xs">{item.reason}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <div className="p-6 text-center text-slate-500 font-semibold bg-slate-50 rounded-xl border border-slate-200">
-              No attendance deductions matching "{deductionFilter}" recorded for this period.
-            </div>
-          )}
-        </div>
-      </div>
 
       <div className="card mt-10 mb-5 overflow-hidden p-0">
         <div className="border-b border-slate-200 bg-gradient-to-r from-white via-slate-50 to-white p-5">
@@ -2010,6 +1889,129 @@ export default function Performance() {
                   )}
                 </div>
               </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Attendance Deductions Breakdown Section */}
+      <div className="card mt-10 mb-5 overflow-hidden p-0">
+        <div className="border-b border-slate-200 bg-gradient-to-r from-white via-rose-50/40 to-white p-5">
+          <div className="flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 className="text-xl font-extrabold text-black">
+                Attendance Deductions Breakdown
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Detailed record of all attendance deductions (Absence, Half Day, Missing Hours, Unpaid Leave) for {monthName}
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              {user?.role !== 'EMPLOYEE' && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-slate-600">Employee:</label>
+                  <select
+                    className="input !py-1.5 !px-3 text-xs font-bold max-w-[200px]"
+                    value={deductionEmployee || target}
+                    onChange={(e) => setDeductionEmployee(e.target.value)}
+                  >
+                    <option value="">All Accessible</option>
+                    {emps.map((e) => (
+                      <option key={e.id} value={String(e.id)}>
+                        {e.first_name} {e.last_name} ({e.employee_code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-bold text-slate-600">Type:</label>
+                <select
+                  className="input !py-1.5 !px-3 text-xs font-bold"
+                  value={deductionFilter}
+                  onChange={(e) => setDeductionFilter(e.target.value as any)}
+                >
+                  <option value="All">All Deductions</option>
+                  <option value="Absent">Absent</option>
+                  <option value="Half Day">Half Day</option>
+                  <option value="Partial">Partial</option>
+                  <option value="Unpaid Leave">Unpaid Leave</option>
+                </select>
+              </div>
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-extrabold text-rose-800 shadow-sm">
+                Total Items: {filteredDeductionItems.length}
+              </div>
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-extrabold text-red-800 shadow-sm">
+                Total Deduction: {filteredDeductionItems.reduce((sum, item) => sum + item.deduction_percentage, 0).toFixed(2)}%
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="p-5">
+          {filteredDeductionItems.length > 0 ? (
+            <div className="table-wrap">
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Date</th>
+                    {user?.role !== 'EMPLOYEE' && <th>Employee</th>}
+                    <th>Attendance Status</th>
+                    <th>Required</th>
+                    <th>Worked</th>
+                    <th>Missing</th>
+                    <th>Deduction Type</th>
+                    <th>Deduction %</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredDeductionItems.map((item, idx) => (
+                    <tr key={`${item.employee_id}-${item.date}-${idx}`}>
+                      <td className="font-bold">{item.date}</td>
+                      {user?.role !== 'EMPLOYEE' && (
+                        <td>
+                          <b>{item.employee_name}</b>
+                          <div className="text-xs muted">{item.employee_code}</div>
+                        </td>
+                      )}
+                      <td>
+                        <span
+                          className={`badge font-extrabold ${
+                            item.normalized_category === 'Absent'
+                              ? 'border border-red-200 bg-red-50 text-red-700'
+                              : item.normalized_category === 'Half Day'
+                              ? 'border border-amber-200 bg-amber-50 text-amber-800'
+                              : item.normalized_category === 'Unpaid Leave'
+                              ? 'border border-blue-200 bg-blue-50 text-blue-700'
+                              : 'border border-orange-200 bg-orange-50 text-orange-800'
+                          }`}
+                        >
+                          {item.status}
+                        </span>
+                      </td>
+                      <td>{formatMinutes(item.required_minutes)}</td>
+                      <td>{formatMinutes(item.worked_minutes)}</td>
+                      <td className="font-extrabold text-red-600">
+                        {formatMinutes(item.missing_minutes)}
+                      </td>
+                      <td>
+                        <span className="badge border border-amber-200 bg-amber-50 text-amber-800 font-bold">
+                          {item.deduction_type}
+                        </span>
+                      </td>
+                      <td className="font-extrabold text-red-700 text-sm">
+                        {item.deduction_percentage.toFixed(2)}%
+                      </td>
+                      <td className="text-xs text-slate-600 max-w-xs">{item.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="p-6 text-center text-slate-500 font-semibold bg-slate-50 rounded-xl border border-slate-200">
+              No attendance deductions matching "{deductionFilter}" recorded for this period.
             </div>
           )}
         </div>
