@@ -16,6 +16,8 @@ export default function Performance() {
   const [leaveRows, setLeaveRows] = useState<any[]>([]);
   const [attendanceLoading, setAttendanceLoading] = useState(false);
   const [selectedAttendanceDate, setSelectedAttendanceDate] = useState<string | null>(null);
+  const [deductionFilter, setDeductionFilter] = useState<'All' | 'Absent' | 'Half Day' | 'Partial' | 'Unpaid Leave'>('All');
+  const [deductionEmployee, setDeductionEmployee] = useState<string>('');
 
   const now = new Date();
 
@@ -238,6 +240,13 @@ export default function Performance() {
   const dateKey = (year: number, month: number, day: number) =>
     `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 
+  const shiftDate = (dateText: string, days: number) => {
+    const [year, month, day] = dateText.split('-').map(Number);
+    const d = new Date(Date.UTC(year, month - 1, day));
+    d.setUTCDate(d.getUTCDate() + days);
+    return d.toISOString().slice(0, 10);
+  };
+
   const isSundayDate = (date: string) => {
     const [year, month, day] = date.split('-').map(Number);
     return new Date(year, month - 1, day).getDay() === 0;
@@ -262,7 +271,7 @@ export default function Performance() {
       return String(itemDate).slice(0, 10) === date;
     });
 
-  const getLeaveForDate = (date: string) =>
+  const getLeaveForDate = (date: string, employeeId?: string | number) =>
     leaveRows.filter((item) => {
       const requestStatus = String(item.status || '').toUpperCase();
 
@@ -277,10 +286,16 @@ export default function Performance() {
         return false;
       }
 
+      const targetEmp =
+        employeeId !== undefined
+          ? employeeId
+          : user?.role === 'EMPLOYEE'
+            ? user.employeeId
+            : target;
+
       if (
-        user?.role !== 'EMPLOYEE' &&
-        target &&
-        String(item.employee_id) !== String(target)
+        targetEmp &&
+        String(item.employee_id) !== String(targetEmp)
       ) {
         return false;
       }
@@ -292,7 +307,8 @@ export default function Performance() {
     String(record?.status || 'NO RECORD').toUpperCase();
 
   const individualStatus = (date: string, record?: any) => {
-    const dayLeaves = getLeaveForDate(date);
+    const empId = record?.employee_id || (user?.role === 'EMPLOYEE' ? user.employeeId : target);
+    const dayLeaves = getLeaveForDate(date, empId);
 
     if (
       dayLeaves.some(
@@ -310,10 +326,13 @@ export default function Performance() {
       const status = attendanceStatus(record);
 
       if (status === 'LEAVE') return 'LEAVE';
-      if (status === 'LATE') return 'LATE';
       if (status === 'ABSENT') return 'ABSENT';
 
-      if (status === 'PRESENT') {
+      if (status === 'HALF DAY' || status === 'HALF_DAY' || record.checkout_missed) {
+        return 'HALF DAY';
+      }
+
+      if (status === 'PRESENT' || status === 'LATE') {
         if (
           record.checkout_missed ||
           (record.check_in && !record.check_out && isPastDate(date))
@@ -344,8 +363,6 @@ export default function Performance() {
         return 'border-blue-300 bg-blue-50 text-blue-800 hover:bg-blue-100';
       case 'HALF DAY':
         return 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100';
-      case 'LATE':
-        return 'border-purple-300 bg-purple-50 text-purple-800 hover:bg-purple-100';
       case 'PENDING LEAVE':
         return 'border-orange-300 bg-orange-50 text-orange-800 hover:bg-orange-100';
       case 'WEEK OFF':
@@ -363,7 +380,6 @@ export default function Performance() {
       case 'ABSENT': return 'bg-red-500';
       case 'LEAVE': return 'bg-blue-500';
       case 'HALF DAY': return 'bg-amber-500';
-      case 'LATE': return 'bg-purple-500';
       case 'PENDING LEAVE': return 'bg-orange-500';
       case 'WEEK OFF': return 'bg-slate-400';
       default: return 'bg-slate-300';
@@ -388,28 +404,41 @@ export default function Performance() {
   }, [rows, target, user?.role, user?.employeeId]);
 
   const performanceAttendanceDeduction = useMemo(() => {
-    const daily = selectedPerformanceRow?.attendance_daily;
+    if (selectedPerformanceRow) {
+      const daily = selectedPerformanceRow?.attendance_daily;
 
-    const parsed =
-      Array.isArray(daily)
-        ? daily
-        : typeof daily === 'string'
-          ? (() => {
-              try {
-                const value = JSON.parse(daily);
-                return Array.isArray(value) ? value : [];
-              } catch {
-                return [];
-              }
-            })()
-          : [];
+      const parsed =
+        Array.isArray(daily)
+          ? daily
+          : typeof daily === 'string'
+            ? (() => {
+                try {
+                  const value = JSON.parse(daily);
+                  return Array.isArray(value) ? value : [];
+                } catch {
+                  return [];
+                }
+              })()
+            : [];
 
-    return parsed.reduce(
-      (sum: number, item: any) =>
-        sum + safeNumber(item?.deduction_percentage, 0),
-      0
-    );
-  }, [selectedPerformanceRow]);
+      const sum = parsed.reduce(
+        (acc: number, item: any) =>
+          acc + safeNumber(item?.deduction_percentage, 0),
+        0
+      );
+      return sum > 0 ? sum : safeNumber(selectedPerformanceRow?.attendance_deduction, 0);
+    }
+
+    if (rows.length > 0) {
+      const total = rows.reduce(
+        (sum, r) => sum + clampScore(r.attendance_deduction),
+        0
+      );
+      return total / rows.length;
+    }
+
+    return 0;
+  }, [selectedPerformanceRow, rows]);
 
   const getDailyPerformanceForDate = (date: string) => {
     const daily = selectedPerformanceRow?.attendance_daily;
@@ -438,16 +467,16 @@ export default function Performance() {
 
   const getCalendarDayData = (date: string) => {
     const records = getAttendanceForDate(date);
-    const leaves = getLeaveForDate(date);
+    const selectedEmployeeId =
+      user?.role === 'EMPLOYEE' ? user.employeeId : target;
+
+    const leaves = getLeaveForDate(date, selectedEmployeeId || undefined);
     const approvedLeaves = leaves.filter(
       (item) => String(item.status || '').toUpperCase() === 'APPROVED'
     );
     const pendingLeaves = leaves.filter(
       (item) => String(item.status || '').toUpperCase() === 'PENDING'
     );
-
-    const selectedEmployeeId =
-      user?.role === 'EMPLOYEE' ? user.employeeId : target;
 
     const scopedRecords = selectedEmployeeId
       ? records.filter(
@@ -481,6 +510,15 @@ export default function Performance() {
       individualStatus(date, record)
     );
 
+    // Also include employees on approved leave who don't have an attendance record
+    const leaveRecordsEmployees = new Set(scopedRecords.map((r) => String(r.employee_id)));
+    const unrecordedApprovedLeaves = approvedLeaves.filter(
+      (l) => !leaveRecordsEmployees.has(String(l.employee_id))
+    );
+    for (let i = 0; i < unrecordedApprovedLeaves.length; i++) {
+      statuses.push('LEAVE');
+    }
+
     if (!statuses.length) {
       const status = pendingLeaves.length
         ? 'PENDING LEAVE'
@@ -509,7 +547,6 @@ export default function Performance() {
       'LEAVE',
       'ABSENT',
       'HALF DAY',
-      'LATE',
       'PRESENT',
       'PENDING LEAVE',
     ];
@@ -574,29 +611,98 @@ export default function Performance() {
     setSelectedAttendanceDate(null);
   };
 
-  const attendanceSummary = attendanceRows.reduce(
-    (summary, record) => {
-      const status = attendanceStatus(record);
+  const attendanceSummary = useMemo(() => {
+    const selectedEmployeeId =
+      user?.role === 'EMPLOYEE' ? user.employeeId : target;
 
-      if (status === 'PRESENT') summary.present += 1;
-      if (status === 'ABSENT') summary.absent += 1;
-      if (status === 'LEAVE') summary.leave += 1;
-      if (status === 'HALF DAY' || record.checkout_missed) {
-        summary.halfDay += 1;
+    if (selectedEmployeeId) {
+      let present = 0;
+      let absent = 0;
+      let leave = 0;
+      let halfDay = 0;
+
+      for (let day = 1; day <= daysInMonth; day++) {
+        const date = dateKey(selectedYear, selectedMonth, day);
+        const dayData = getCalendarDayData(date);
+        if (dayData.status === 'PRESENT') {
+          present += 1;
+        } else if (dayData.status === 'ABSENT') {
+          absent += 1;
+        } else if (dayData.status === 'LEAVE') {
+          leave += 1;
+        } else if (dayData.status === 'HALF DAY') {
+          halfDay += 1;
+        }
       }
-      if (status === 'LATE') summary.late += 1;
 
-      return summary;
-    },
-    {
-      present: 0,
-      absent: 0,
-      leave: 0,
-      halfDay: 0,
-      late: 0,
-      deduction: 0,
+      return {
+        present,
+        absent,
+        leave,
+        halfDay,
+      };
     }
-  );
+
+    let present = 0;
+    let absent = 0;
+    let leave = 0;
+    let halfDay = 0;
+
+    for (const record of attendanceRows) {
+      const status = attendanceStatus(record);
+      const isCheckOutMissed =
+        !!record.checkout_missed ||
+        (!!record.check_in &&
+          !record.check_out &&
+          isPastDate(String(record.work_date || record.date || '').slice(0, 10)));
+
+      if (
+        status === 'HALF DAY' ||
+        status === 'HALF_DAY' ||
+        isCheckOutMissed
+      ) {
+        halfDay += 1;
+      } else if (status === 'PRESENT' || status === 'LATE') {
+        present += 1;
+      } else if (status === 'ABSENT') {
+        absent += 1;
+      } else if (status === 'LEAVE') {
+        leave += 1;
+      }
+    }
+
+    // Count approved leave days for all accessible employees that might not be in attendanceRows
+    for (const l of leaveRows) {
+      if (String(l.status || '').toUpperCase() === 'APPROVED') {
+        const start = String(l.start_date || '').slice(0, 10);
+        const end = String(l.end_date || '').slice(0, 10);
+        if (start && end) {
+          let cur = start;
+          while (cur <= end) {
+            const [y, m] = cur.split('-').map(Number);
+            if (y === selectedYear && m === selectedMonth && !isSundayDate(cur)) {
+              const hasAttendance = attendanceRows.some(
+                (a) =>
+                  String(a.employee_id) === String(l.employee_id) &&
+                  String(a.work_date || a.date).slice(0, 10) === cur
+              );
+              if (!hasAttendance) {
+                leave += 1;
+              }
+            }
+            cur = shiftDate(cur, 1);
+          }
+        }
+      }
+    }
+
+    return {
+      present,
+      absent,
+      leave,
+      halfDay,
+    };
+  }, [attendanceRows, leaveRows, target, user?.role, user?.employeeId, daysInMonth, selectedYear, selectedMonth, rows]);
 
   const selectedDayData = selectedAttendanceDate
     ? getCalendarDayData(selectedAttendanceDate)
@@ -627,25 +733,23 @@ export default function Performance() {
   }, [rows, target]);
 
   const allDeductionItems = useMemo(() => {
-    const items: Array<{
+    const itemsMap = new Map<string, {
       date: string;
       employee_id: number;
       employee_name: string;
       employee_code: string;
       status: string;
+      normalized_category: 'Absent' | 'Half Day' | 'Partial' | 'Unpaid Leave';
       required_minutes: number;
       worked_minutes: number;
       missing_minutes: number;
       deduction_percentage: number;
       deduction_type: string;
       reason: string;
-    }> = [];
+    }>();
 
-    const targetRows = target
-      ? rows.filter((r) => String(r.employee_id) === String(target))
-      : rows;
-
-    for (const r of targetRows) {
+    // 1. Process all daily entries from calculated performance scores (rows)
+    for (const r of rows) {
       const daily = r.attendance_daily;
       const parsed = Array.isArray(daily)
         ? daily
@@ -662,30 +766,71 @@ export default function Performance() {
       for (const day of parsed) {
         const missing = safeNumber(day.missing_minutes, 0);
         const deductionPct = safeNumber(day.deduction_percentage, 0);
-        if (missing > 0 || deductionPct > 0) {
-          const isLeave = day.status === 'LEAVE';
-          const isAbsent = day.status === 'ABSENT' || day.status === 'NO_RECORD';
-          const deductionType = isLeave
-            ? 'Unpaid Leave'
-            : isAbsent
-            ? 'Unpaid Absence'
-            : 'Insufficient Hours';
-          const reason = isLeave
-            ? 'Approved Unpaid Leave day'
-            : isAbsent
-            ? 'Marked Absent (treated as unpaid leave)'
-            : 'Actual working time less than required hours';
+        const worked = safeNumber(day.worked_minutes, 0);
+        const required = safeNumber(day.required_minutes, 0);
+        const dateStr = String(day.work_date || day.date).slice(0, 10);
 
-          items.push({
-            date: String(day.work_date || day.date).slice(0, 10),
+        if (missing > 0 || deductionPct > 0) {
+          const attRec = attendanceRows.find(
+            (a) =>
+              String(a.employee_id) === String(r.employee_id) &&
+              String(a.work_date || a.date || a.attendance_date).slice(0, 10) === dateStr
+          );
+
+          const hasCheckIn = !!attRec?.check_in;
+          const hasCheckOut = !!attRec?.check_out;
+          const isCheckoutMissed =
+            !!attRec?.checkout_missed ||
+            (hasCheckIn && !hasCheckOut && isPastDate(dateStr));
+
+          const statusUpper = String(day.status || '').toUpperCase();
+          const isLeave = statusUpper === 'LEAVE' || !!day.leave_type;
+          const isAbsent =
+            statusUpper === 'ABSENT' ||
+            statusUpper === 'NO_RECORD' ||
+            (worked === 0 && missing >= required && !isLeave && !hasCheckIn);
+
+          const isHalfDay =
+            !isLeave &&
+            !isAbsent &&
+            (isCheckoutMissed ||
+              ((statusUpper === 'HALF_DAY' || statusUpper === 'HALF DAY') && !hasCheckOut));
+
+          let normalized_category: 'Absent' | 'Half Day' | 'Partial' | 'Unpaid Leave' = 'Partial';
+          let displayStatus = 'Partial';
+          let deductionType = 'Insufficient Hours';
+          let reason = `Worked ${formatMinutes(worked)} out of required ${formatMinutes(required)}`;
+
+          if (isLeave) {
+            normalized_category = 'Unpaid Leave';
+            displayStatus = day.leave_type ? `Leave (${day.leave_type})` : 'Leave';
+            deductionType = 'Unpaid Leave';
+            reason = day.leave_type ? `Approved ${day.leave_type} Leave` : 'Unpaid Leave day';
+          } else if (isAbsent) {
+            normalized_category = 'Absent';
+            displayStatus = 'Absent';
+            deductionType = 'Unpaid Absence';
+            reason = 'Marked Absent / No check-in recorded';
+          } else if (isHalfDay) {
+            normalized_category = 'Half Day';
+            displayStatus = 'Half Day';
+            deductionType = 'Half Day';
+            const halfWorked = worked > 0 ? worked : Math.round(required / 2);
+            reason = `Half day • Checkout missing (credited ${formatMinutes(halfWorked)} of required ${formatMinutes(required)}, 50% deduction)`;
+          }
+
+          const key = `${r.employee_id}-${dateStr}`;
+          itemsMap.set(key, {
+            date: dateStr,
             employee_id: Number(r.employee_id),
             employee_name: r.employee_name || 'Employee',
             employee_code: r.employee_code || `#${r.employee_id}`,
-            status: isLeave ? 'LEAVE (UNPAID)' : isAbsent ? 'ABSENT' : day.status || 'PARTIAL',
-            required_minutes: safeNumber(day.required_minutes, 0),
-            worked_minutes: safeNumber(day.worked_minutes, 0),
-            missing_minutes: missing,
-            deduction_percentage: deductionPct,
+            status: displayStatus,
+            normalized_category,
+            required_minutes: required,
+            worked_minutes: isHalfDay && worked === 0 ? Math.round(required / 2) : worked,
+            missing_minutes: isHalfDay && missing === 0 ? Math.round(required / 2) : missing,
+            deduction_percentage: deductionPct > 0 ? deductionPct : (100 / 26) * 0.5,
             deduction_type: deductionType,
             reason,
           });
@@ -693,8 +838,104 @@ export default function Performance() {
       }
     }
 
-    return items.sort((a, b) => (a.date < b.date ? 1 : -1));
-  }, [rows, target]);
+    // 2. Process all records from attendanceRows (ensuring half-day and missed checkout logs are never omitted)
+    for (const att of attendanceRows) {
+      const dateStr = String(att.work_date || att.date || att.attendance_date).slice(0, 10);
+      const empId = Number(att.employee_id);
+      const key = `${empId}-${dateStr}`;
+
+      const hasCheckIn = !!att.check_in;
+      const hasCheckOut = !!att.check_out;
+      const isCheckoutMissed =
+        !!att.checkout_missed ||
+        (hasCheckIn && !hasCheckOut && isPastDate(dateStr));
+      const statusUpper = String(att.status || '').toUpperCase();
+      const reqMinutes = safeNumber(att.required_work_minutes, safeNumber(att.required_work_hours, 8) * 60);
+
+      const empName = att.employee_name || emps.find((e) => Number(e.id) === empId)?.first_name || 'Employee';
+      const empCode = att.employee_code || emps.find((e) => Number(e.id) === empId)?.employee_code || `#${empId}`;
+
+      if (isCheckoutMissed || (statusUpper === 'HALF_DAY' || statusUpper === 'HALF DAY')) {
+        const worked = Math.round(reqMinutes / 2);
+        const missing = reqMinutes - worked;
+        const deductionPct = (missing / reqMinutes) * (100 / 26);
+
+        itemsMap.set(key, {
+          date: dateStr,
+          employee_id: empId,
+          employee_name: empName,
+          employee_code: empCode,
+          status: 'Half Day',
+          normalized_category: 'Half Day',
+          required_minutes: reqMinutes,
+          worked_minutes: worked,
+          missing_minutes: missing,
+          deduction_percentage: deductionPct,
+          deduction_type: 'Half Day',
+          reason: `Half day • Checkout missing (credited ${formatMinutes(worked)} of required ${formatMinutes(reqMinutes)}, 50% deduction)`,
+        });
+      } else if (statusUpper === 'ABSENT' && !itemsMap.has(key)) {
+        const deductionPct = 100 / 26;
+        itemsMap.set(key, {
+          date: dateStr,
+          employee_id: empId,
+          employee_name: empName,
+          employee_code: empCode,
+          status: 'Absent',
+          normalized_category: 'Absent',
+          required_minutes: reqMinutes,
+          worked_minutes: 0,
+          missing_minutes: reqMinutes,
+          deduction_percentage: deductionPct,
+          deduction_type: 'Unpaid Absence',
+          reason: 'Marked Absent / No check-in recorded',
+        });
+      } else if (hasCheckIn && hasCheckOut && !itemsMap.has(key)) {
+        const workedMinutes = safeNumber(att.worked_minutes, safeNumber(att.total_hours, 0) * 60);
+        if (workedMinutes < reqMinutes) {
+          const missing = reqMinutes - workedMinutes;
+          const deductionPct = (missing / reqMinutes) * (100 / 26);
+          itemsMap.set(key, {
+            date: dateStr,
+            employee_id: empId,
+            employee_name: empName,
+            employee_code: empCode,
+            status: 'Partial',
+            normalized_category: 'Partial',
+            required_minutes: reqMinutes,
+            worked_minutes: workedMinutes,
+            missing_minutes: missing,
+            deduction_percentage: deductionPct,
+            deduction_type: 'Insufficient Hours',
+            reason: `Worked ${formatMinutes(workedMinutes)} out of required ${formatMinutes(reqMinutes)}`,
+          });
+        }
+      }
+    }
+
+    return Array.from(itemsMap.values()).sort((a, b) => (a.date < b.date ? 1 : -1));
+  }, [rows, attendanceRows, emps]);
+
+  const filteredDeductionItems = useMemo(() => {
+    return allDeductionItems.filter((item) => {
+      if (user?.role === 'EMPLOYEE') {
+        if (String(item.employee_id) !== String(user.employeeId)) {
+          return false;
+        }
+      } else {
+        if (deductionEmployee && String(item.employee_id) !== String(deductionEmployee)) {
+          return false;
+        }
+        if (!deductionEmployee && target && String(item.employee_id) !== String(target)) {
+          return false;
+        }
+      }
+      if (deductionFilter !== 'All' && item.normalized_category !== deductionFilter) {
+        return false;
+      }
+      return true;
+    });
+  }, [allDeductionItems, deductionFilter, deductionEmployee, target, user?.role, user?.employeeId]);
 
   return (
     <>
@@ -1057,23 +1298,59 @@ export default function Performance() {
       {/* Attendance Deductions Breakdown Section */}
       <div className="card mt-10 mb-5 overflow-hidden p-0">
         <div className="border-b border-slate-200 bg-gradient-to-r from-white via-rose-50/40 to-white p-5">
-          <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
               <h2 className="text-xl font-extrabold text-black">
                 Attendance Deductions Breakdown
               </h2>
               <p className="mt-1 text-sm text-slate-600">
-                Detailed record of all attendance deductions (Absences treated as Unpaid Leave, Missing Hours) for {monthName}
+                Detailed record of all attendance deductions (Absence, Half Day, Missing Hours, Unpaid Leave) for {monthName}
               </p>
             </div>
-            <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-extrabold text-rose-800 shadow-sm">
-              Total Deduction Items: {allDeductionItems.length}
+            <div className="flex flex-wrap items-center gap-3">
+              {user?.role !== 'EMPLOYEE' && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs font-bold text-slate-600">Employee:</label>
+                  <select
+                    className="input !py-1.5 !px-3 text-xs font-bold max-w-[200px]"
+                    value={deductionEmployee || target}
+                    onChange={(e) => setDeductionEmployee(e.target.value)}
+                  >
+                    <option value="">All Accessible</option>
+                    {emps.map((e) => (
+                      <option key={e.id} value={String(e.id)}>
+                        {e.first_name} {e.last_name} ({e.employee_code})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-bold text-slate-600">Type:</label>
+                <select
+                  className="input !py-1.5 !px-3 text-xs font-bold"
+                  value={deductionFilter}
+                  onChange={(e) => setDeductionFilter(e.target.value as any)}
+                >
+                  <option value="All">All Deductions</option>
+                  <option value="Absent">Absent</option>
+                  <option value="Half Day">Half Day</option>
+                  <option value="Partial">Partial</option>
+                  <option value="Unpaid Leave">Unpaid Leave</option>
+                </select>
+              </div>
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-2 text-sm font-extrabold text-rose-800 shadow-sm">
+                Total Items: {filteredDeductionItems.length}
+              </div>
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm font-extrabold text-red-800 shadow-sm">
+                Total Deduction: {filteredDeductionItems.reduce((sum, item) => sum + item.deduction_percentage, 0).toFixed(2)}%
+              </div>
             </div>
           </div>
         </div>
 
         <div className="p-5">
-          {allDeductionItems.length > 0 ? (
+          {filteredDeductionItems.length > 0 ? (
             <div className="table-wrap">
               <table className="table">
                 <thead>
@@ -1090,7 +1367,7 @@ export default function Performance() {
                   </tr>
                 </thead>
                 <tbody>
-                  {allDeductionItems.map((item, idx) => (
+                  {filteredDeductionItems.map((item, idx) => (
                     <tr key={`${item.employee_id}-${item.date}-${idx}`}>
                       <td className="font-bold">{item.date}</td>
                       {user?.role !== 'EMPLOYEE' && (
@@ -1100,7 +1377,17 @@ export default function Performance() {
                         </td>
                       )}
                       <td>
-                        <span className="badge border border-red-200 bg-red-50 text-red-700 font-extrabold">
+                        <span
+                          className={`badge font-extrabold ${
+                            item.normalized_category === 'Absent'
+                              ? 'border border-red-200 bg-red-50 text-red-700'
+                              : item.normalized_category === 'Half Day'
+                              ? 'border border-amber-200 bg-amber-50 text-amber-800'
+                              : item.normalized_category === 'Unpaid Leave'
+                              ? 'border border-blue-200 bg-blue-50 text-blue-700'
+                              : 'border border-orange-200 bg-orange-50 text-orange-800'
+                          }`}
+                        >
                           {item.status}
                         </span>
                       </td>
@@ -1125,7 +1412,7 @@ export default function Performance() {
             </div>
           ) : (
             <div className="p-6 text-center text-slate-500 font-semibold bg-slate-50 rounded-xl border border-slate-200">
-              No attendance deductions recorded for this period. All attendance requirements have been met.
+              No attendance deductions matching "{deductionFilter}" recorded for this period.
             </div>
           )}
         </div>
@@ -1181,15 +1468,14 @@ export default function Performance() {
         </div>
 
         <div className="p-5">
-          <div className="mb-5 grid grid-cols-2 gap-3 md:grid-cols-6">
+          <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
             {[
               ['Present', attendanceSummary.present, 'bg-green-50 border-green-200 text-green-800'],
               ['Absent', attendanceSummary.absent, 'bg-red-50 border-red-200 text-red-800'],
               ['Leave', attendanceSummary.leave, 'bg-blue-50 border-blue-200 text-blue-800'],
               ['Half Day', attendanceSummary.halfDay, 'bg-amber-50 border-amber-200 text-amber-800'],
-              ['Late', attendanceSummary.late, 'bg-purple-50 border-purple-200 text-purple-800'],
               [
-                'Deduction',
+                selectedPerformanceRow ? 'Deduction' : 'Avg Deduction',
                 `${performanceAttendanceDeduction.toFixed(2)}%`,
                 'bg-slate-50 border-slate-200 text-slate-800',
               ],
@@ -1211,7 +1497,6 @@ export default function Performance() {
           <div className="mb-5 flex flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-bold text-slate-700">
             {[
               ['PRESENT', 'Present'],
-              ['LATE', 'Late'],
               ['LEAVE', 'Leave'],
               ['HALF DAY', 'Half Day'],
               ['ABSENT', 'Absent'],

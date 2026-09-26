@@ -122,6 +122,19 @@ export async function runAutoMigrations() {
         ON notes(user_id, updated_at DESC);
     `);
 
+    // 6. Update task_completion_submissions proof_type check to allow any proof type (LINK, URL, FILE, NONE, etc.)
+    await query(`
+      ALTER TABLE task_completion_submissions DROP CONSTRAINT IF EXISTS task_completion_submissions_proof_type_check;
+      ALTER TABLE task_completion_submissions ALTER COLUMN proof_type DROP NOT NULL;
+      ALTER TABLE task_completion_submissions ALTER COLUMN proof_url DROP NOT NULL;
+      ALTER TABLE tasks DROP CONSTRAINT IF EXISTS tasks_status_check;
+      ALTER TABLE tasks ADD CONSTRAINT tasks_status_check CHECK(
+        status IN ('PENDING','IN_PROGRESS','BLOCKED','SUBMITTED','NEEDS_CHANGES','COMPLETED','REJECTED','CANCELLED','DRAFT')
+      );
+      ALTER TABLE performance_attendance_daily ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PRESENT';
+      ALTER TABLE performance_attendance_daily ADD COLUMN IF NOT EXISTS leave_type VARCHAR(50);
+    `);
+
     console.log('[DB] Auto-migrations and schema verifications completed successfully.');
   } catch (err) {
     console.error('[DB] Migration error (non-fatal if tables already match):', err);

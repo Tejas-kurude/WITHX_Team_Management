@@ -683,21 +683,23 @@ export async function listTasks(req: Request, res: Response) {
     w += ` AND t.status <> 'DRAFT'`;
   }
 
-  // Active vs Past tasks segmentation
-  if (statusGroup === 'past') {
+  // Active / Pending vs Completed vs Rejected segmentation
+  if (statusGroup === 'completed' || statusGroup === 'past') {
     w += ` AND t.status = 'COMPLETED'`;
-  } else if (statusGroup === 'active' && !status) {
-    w += ` AND t.status NOT IN ('COMPLETED', 'DRAFT')`;
+  } else if (statusGroup === 'rejected') {
+    w += ` AND t.status = 'REJECTED'`;
+  } else if ((statusGroup === 'pending' || statusGroup === 'active') && !status) {
+    w += ` AND t.status NOT IN ('COMPLETED', 'REJECTED', 'DRAFT')`;
   }
 
   if (status) {
-    if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','CANCELLED','DRAFT')`;
+    if (status === 'OVERDUE') w += ` AND t.due_date<now() AND t.status NOT IN ('COMPLETED','REJECTED','CANCELLED','DRAFT')`;
     else if (status !== 'DRAFT') { p.push(status); w += ` AND t.status=$${p.length}`; }
   }
   if (priority) { p.push(priority); w += ` AND t.priority=$${p.length}`; }
   if (department) { p.push(Number(department)); w += ` AND e.department_id=$${p.length}`; }
   if (employeeId) { p.push(Number(employeeId)); w += ` AND t.assigned_to=$${p.length}`; }
-  if (teamLeadId) { p.push(Number(teamLeadId)); w += ` AND e.team_lead_id=$${p.length}`; }
+  if (teamLeadId) { p.push(Number(teamLeadId)); w += ` AND (e.team_lead_id=$${p.length} OR e.id=$${p.length})`; }
   if (date) { p.push(date); w += ` AND t.created_at::date=$${p.length}::date`; }
 const r = await query<any>(
   `
@@ -911,9 +913,12 @@ CASE
   WHEN t.status IN (
     'REJECTED',
     'NEEDS_CHANGES',
-    'COMPLETED',
     'CANCELLED'
   )
+  THEN false
+  WHEN t.status = 'COMPLETED' AND (super_review.decision = 'APPROVED' OR super_review.decision = 'APPROVE')
+  THEN false
+  WHEN t.status NOT IN ('SUBMITTED', 'COMPLETED') AND COALESCE(t.progress, 0) < 100
   THEN false
 
   /*
@@ -923,7 +928,7 @@ CASE
    * is still PENDING.
    */
   WHEN $${p.length + 1}::varchar = 'TEAM_LEAD'
-   AND lead_review.decision = 'PENDING'
+   AND (lead_review.decision = 'PENDING' OR lead_review.decision IS NULL)
    AND e.team_lead_id = $${p.length + 2}::integer
   THEN true
 
@@ -934,7 +939,7 @@ CASE
    * Team Lead does NOT have to approve first.
    */
   WHEN $${p.length + 1}::varchar = 'ADMIN'
-   AND admin_review.decision = 'PENDING'
+   AND (admin_review.decision = 'PENDING' OR admin_review.decision IS NULL)
   THEN true
 
   /*
@@ -944,7 +949,7 @@ CASE
    * Team Lead/Admin do NOT have to approve first.
    */
   WHEN $${p.length + 1}::varchar = 'SUPER_ADMIN'
-   AND super_review.decision = 'PENDING'
+   AND (super_review.decision = 'PENDING' OR super_review.decision IS NULL)
   THEN true
 
   ELSE false
@@ -1133,8 +1138,10 @@ CASE
 
   ${w}
 
-  ${(statusGroup === 'past' || status === 'COMPLETED')
+  ${(statusGroup === 'completed' || statusGroup === 'past' || status === 'COMPLETED')
     ? 'ORDER BY COALESCE(t.completed_at, t.updated_at, t.created_at) DESC, t.id DESC'
+    : (statusGroup === 'rejected' || status === 'REJECTED')
+    ? 'ORDER BY COALESCE(t.updated_at, t.created_at) DESC, t.id DESC'
     : 'ORDER BY GREATEST(t.created_at, COALESCE(latest_edit.edited_at, t.created_at)) DESC, t.id DESC'}
   `,
 
@@ -1492,9 +1499,6 @@ export async function submitTaskForReview(
 
   const hasProofUrl = !!proofUrl?.trim();
   const hasProofFile = !!proofFileName && !!proofFileData;
-  if (!hasProofUrl && !hasProofFile) {
-    return res.status(400).json({ message: 'Add a proof link or upload a proof file.' });
-  }
 
   const taskResult = await query<any>(
     'SELECT * FROM tasks WHERE id=$1',
@@ -1547,24 +1551,23 @@ export async function submitTaskForReview(
     });
   }
 
-  /* Normalize proof evidence. A link may still use the existing
-   * GitHub/Google Drive convention, while uploaded files are accepted
-   * for either technical or non-technical work. */
-  let normalizedProofType = String(proofType || (hasProofFile ? 'FILE' : '')).toUpperCase();
+  /* Validate proof link if provided (optional, any valid URL accepted) */
+  let normalizedProofType = String(proofType || (hasProofFile ? 'FILE' : (hasProofUrl ? 'LINK' : 'NONE'))).toUpperCase();
   if (hasProofUrl) {
-    normalizedProofType = task.task_type === 'NON_TECHNICAL' ? 'GOOGLE_DRIVE' : 'GITHUB';
     let parsedUrl: URL;
-    try { parsedUrl = new URL(proofUrl); }
-    catch { return res.status(400).json({ message: 'Proof link must be a valid URL.' }); }
-    const hostname = parsedUrl.hostname.toLowerCase();
-    if (normalizedProofType === 'GITHUB' && hostname !== 'github.com' && !hostname.endsWith('.github.com')) {
-      return res.status(400).json({ message: 'Technical proof links must use github.com, or upload a proof file instead.' });
+    try {
+      parsedUrl = new URL(proofUrl.trim());
+      if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+        return res.status(400).json({ message: 'Proof link must start with http:// or https://' });
+      }
+    } catch {
+      return res.status(400).json({ message: 'Proof link must be a valid URL.' });
     }
-    if (normalizedProofType === 'GOOGLE_DRIVE' && hostname !== 'drive.google.com' && hostname !== 'docs.google.com') {
-      return res.status(400).json({ message: 'Non-technical proof links must use Google Drive/Docs, or upload a proof file instead.' });
-    }
-  } else {
+    normalizedProofType = 'LINK';
+  } else if (hasProofFile) {
     normalizedProofType = 'FILE';
+  } else {
+    normalizedProofType = 'NONE';
   }
 
   let savedProofName: string | null = null;
@@ -2084,7 +2087,7 @@ export async function reviewTask(
    * =====================================================
    */
 
-  const submissionResult = await query<any>(
+  let submissionResult = await query<any>(
     `
     SELECT *
     FROM task_completion_submissions
@@ -2097,15 +2100,33 @@ export async function reviewTask(
     [id]
   );
 
-  if (!submissionResult.rows[0]) {
-    return res.status(400).json({
-      message:
-        'No completion submission exists for this task.'
-    });
-  }
+  let submission = submissionResult.rows[0];
 
-  const submission =
-    submissionResult.rows[0];
+  if (!submission) {
+    if (task.status === 'COMPLETED' || task.status === 'SUBMITTED' || Number(task.progress) >= 100) {
+      const createdSub = await query<any>(
+        `INSERT INTO task_completion_submissions(task_id, submitted_by, completion_summary, proof_type, submitted_at)
+         VALUES($1, $2, $3, 'NONE', now())
+         RETURNING *`,
+        [id, task.assigned_to, 'Task marked 100% progress / direct review']
+      );
+      submission = createdSub.rows[0];
+      const teamLeadId = task.team_lead_id || null;
+      await query(
+        `INSERT INTO task_reviews(task_id, submission_id, reviewer_id, reviewer_role, decision)
+         VALUES
+           ($1, $2, $3, 'TEAM_LEAD', 'PENDING'),
+           ($1, $2, NULL, 'ADMIN', 'PENDING'),
+           ($1, $2, NULL, 'SUPER_ADMIN', 'PENDING')
+         ON CONFLICT (submission_id, reviewer_role) DO NOTHING`,
+        [id, submission.id, teamLeadId]
+      );
+    } else {
+      return res.status(400).json({
+        message: 'No completion submission exists for this task and task progress is not 100%.'
+      });
+    }
+  }
 
   /*
    * =====================================================
@@ -2283,9 +2304,9 @@ export async function reviewTask(
    * REJECT is final. NEEDS_CHANGES returns the task to employee.
    */
 
-   if (task.status !== 'SUBMITTED') {
+   if (task.status !== 'SUBMITTED' && task.status !== 'COMPLETED' && Number(task.progress) < 100) {
      return res.status(400).json({
-       message: `This task cannot currently be reviewed. Current status: ${task.status}.`
+       message: `This task cannot currently be reviewed. Current status: ${task.status}. Task progress must be 100% or task submitted.`
      });
    }
 
@@ -2841,7 +2862,7 @@ export async function taskReviewHistory(
       t.completed_at,
       e.team_lead_id
     FROM tasks t
-    JOIN employees e
+    LEFT JOIN employees e
       ON e.id = t.assigned_to
     WHERE t.id = $1::integer
     `,
@@ -2863,21 +2884,31 @@ export async function taskReviewHistory(
    */
   if (
     role === 'EMPLOYEE' &&
-    task.assigned_to !== employeeId
+    Number(task.assigned_to) !== Number(employeeId)
   ) {
     return res.status(403).json({
       message: 'You can view history only for your own tasks.'
     });
   }
 
-  if (
-    role === 'TEAM_LEAD' &&
-    task.team_lead_id !== employeeId
-  ) {
-    return res.status(403).json({
-      message:
-        'You can view history only for tasks under your supervision.'
-    });
+  if (role === 'TEAM_LEAD') {
+    const isOwnTask =
+      Number(task.assigned_to) === Number(employeeId) ||
+      Number(task.created_by) === Number(employeeId);
+    const isTeamTask = Number(task.team_lead_id) === Number(employeeId);
+
+    if (!isOwnTask && !isTeamTask) {
+      const teamCheck = await query<any>(
+        'SELECT id FROM employees WHERE id=$1 AND team_lead_id=$2',
+        [task.assigned_to, employeeId]
+      );
+      if (!teamCheck.rows[0]) {
+        return res.status(403).json({
+          message:
+            'You can view history only for tasks assigned to you or under your supervision.'
+        });
+      }
+    }
   }
 
   /*
@@ -4627,27 +4658,40 @@ export async function performance(req: Request, res: Response) {
       ),
       query<any>(
         `SELECT
-           id,
-           title,
-           task_type,
-           start_date::text AS start_date,
-           due_date::text AS due_date,
-           created_at::text AS created_at,
-           completed_at,
-           status
-         FROM tasks
-         WHERE assigned_to=$1
-           AND status NOT IN ('CANCELLED','DRAFT')
-           AND COALESCE(start_date, created_at::date) <= $3::date
+           t.id,
+           t.title,
+           t.task_type,
+           t.start_date::text AS start_date,
+           t.due_date::text AS due_date,
+           t.created_at::text AS created_at,
+           t.completed_at,
+           t.status,
+           cs.submitted_at AS completion_submitted_at,
+           (
+             cs.id IS NOT NULL
+             OR t.status IN ('SUBMITTED', 'COMPLETED', 'REJECTED', 'NEEDS_CHANGES')
+             OR t.completed_at IS NOT NULL
+           ) AS is_submitted
+         FROM tasks t
+         LEFT JOIN LATERAL (
+           SELECT id, submitted_at
+           FROM task_completion_submissions
+           WHERE task_id = t.id
+           ORDER BY submitted_at DESC, id DESC
+           LIMIT 1
+         ) cs ON true
+         WHERE t.assigned_to=$1
+           AND t.status NOT IN ('CANCELLED','DRAFT')
+           AND COALESCE(t.start_date, t.created_at::date) <= $3::date
            AND (
-             due_date IS NULL
-             OR due_date::date >= $2::date
+             t.due_date IS NULL
+             OR t.due_date::date >= $2::date
            )
          ORDER BY
-           COALESCE(start_date::date, created_at::date) ASC,
-           COALESCE(due_date::date, '9999-12-31'::date) ASC,
-           created_at ASC,
-           id ASC`,
+           COALESCE(t.start_date::date, t.created_at::date) ASC,
+           COALESCE(t.due_date::date, '9999-12-31'::date) ASC,
+           t.created_at ASC,
+           t.id ASC`,
         [target, periodStart, calculationEnd]
       ),
       query<any>(
@@ -4807,11 +4851,34 @@ export async function performance(req: Request, res: Response) {
         workedMinutes = 0;
         missingMinutes = requiredMinutes;
       } else if (record) {
-        workedMinutes = Math.min(
-          requiredMinutes,
-          Math.max(0, safeNumber(record.worked_minutes, 0))
-        );
-        missingMinutes = Math.max(0, requiredMinutes - workedMinutes);
+        const hasCheckIn = !!record.check_in;
+        const hasCheckOut = !!record.check_out;
+        const checkoutMissed = !!record.checkout_missed || (hasCheckIn && !hasCheckOut && cursor < systemCurrentDate);
+        const statusUpper = String(record.status || '').toUpperCase();
+
+        if (checkoutMissed || (hasCheckIn && !hasCheckOut && cursor < systemCurrentDate) || statusUpper === 'HALF_DAY' || statusUpper === 'HALF DAY') {
+          effectiveStatus = 'HALF_DAY';
+          workedMinutes = Math.round(requiredMinutes / 2);
+          missingMinutes = Math.max(0, requiredMinutes - workedMinutes);
+        } else if (hasCheckIn && hasCheckOut) {
+          workedMinutes = Math.min(
+            requiredMinutes,
+            Math.max(0, safeNumber(record.worked_minutes, 0))
+          );
+          missingMinutes = Math.max(0, requiredMinutes - workedMinutes);
+          if (missingMinutes > 0) {
+            effectiveStatus = 'PARTIAL';
+          } else {
+            effectiveStatus = 'PRESENT';
+          }
+        } else {
+          workedMinutes = Math.min(
+            requiredMinutes,
+            Math.max(0, safeNumber(record.worked_minutes, 0))
+          );
+          missingMinutes = Math.max(0, requiredMinutes - workedMinutes);
+          effectiveStatus = missingMinutes > 0 ? (workedMinutes === 0 ? 'ABSENT' : 'PARTIAL') : 'PRESENT';
+        }
       } else if (cursor < systemCurrentDate) {
         effectiveStatus = 'ABSENT';
         workedMinutes = 0;
@@ -4869,15 +4936,19 @@ export async function performance(req: Request, res: Response) {
         `INSERT INTO performance_attendance_daily(
            employee_id,
            work_date,
+           status,
+           leave_type,
            required_minutes,
            worked_minutes,
            missing_minutes,
            attendance_percentage,
            deduction_percentage
          )
-         VALUES($1,$2::date,$3,$4,$5,$6,$7)
+         VALUES($1,$2::date,$3,$4,$5,$6,$7,$8,$9)
          ON CONFLICT(employee_id,work_date)
          DO UPDATE SET
+           status=EXCLUDED.status,
+           leave_type=EXCLUDED.leave_type,
            required_minutes=EXCLUDED.required_minutes,
            worked_minutes=EXCLUDED.worked_minutes,
            missing_minutes=EXCLUDED.missing_minutes,
@@ -4887,6 +4958,8 @@ export async function performance(req: Request, res: Response) {
         [
           target,
           daily.date,
+          daily.status || 'PRESENT',
+          daily.leave_type || null,
           daily.required_minutes,
           daily.worked_minutes,
           daily.missing_minutes,
@@ -4911,22 +4984,16 @@ export async function performance(req: Request, res: Response) {
     );
 
     /*
-     * TASK PERFORMANCE
+     * TASK PERFORMANCE & TASK DEDUCTION CALCULATION
      *
-     * Completion Days:
-     * start day = day 1.
-     * 1–5 days = 100% with the default configuration.
-     * Each day after the allowed deadline removes the configured
-     * percentage points.
+     * 1. Task Performance % = (Total Tasks Submitted / Total Tasks Assigned) * 100
+     * 2. Task Deduction %: Each overdue day for a task contributes 20% toward the task's deduction
+     *    Total Task Deduction = (Sum of all task overdue deductions) / (Total Number of Tasks)
      */
     const taskDetails: any[] = [];
-
-    const calendarDayNumber = (value: Date) =>
-      Date.UTC(
-        value.getUTCFullYear(),
-        value.getUTCMonth(),
-        value.getUTCDate()
-      );
+    const taskCount = taskResult.rows.length;
+    let submittedTaskCount = 0;
+    let totalTaskOverdueDeductionSum = 0;
 
     for (const task of taskResult.rows) {
       const taskStart =
@@ -4934,113 +5001,66 @@ export async function performance(req: Request, res: Response) {
           ? dateOnlyValue(task.start_date)
           : dateOnlyValue(task.created_at);
 
-      /*
-       * Task age is measured from the START DATE, not created_at.
-       * A task created today with a previous start date therefore
-       * receives the correct overdue deduction immediately.
-       *
-       * Completed tasks use their actual completion date.
-       * Open tasks are evaluated through calculationEnd.
-       */
-      const completionDate =
-        String(task.status).toUpperCase() === 'COMPLETED' &&
-        task.completed_at
-          ? dateOnlyValue(task.completed_at)
-          : calculationEnd;
+      const dueDate = task.due_date ? dateOnlyValue(task.due_date) : null;
+      const isSubmitted = !!task.is_submitted;
+      if (isSubmitted) {
+        submittedTaskCount += 1;
+      }
 
-      // Never use created_at to determine task age. The performance window
-      // uses the task's actual Start Date and End Date (due_date) to find
-      // tasks that belong to the period. The score itself is based on the
-      // number of calendar days from Start Date through completion/current
-      // calculation date, so a task created today with an older Start Date
-      // is immediately evaluated as overdue when appropriate.
+      // Finish date for overdue day calculation
+      const finishDate =
+        task.completion_submitted_at
+          ? dateOnlyValue(task.completion_submitted_at)
+          : (task.completed_at
+            ? dateOnlyValue(task.completed_at)
+            : calculationEnd);
 
-      const start = new Date(
-        `${taskStart}T00:00:00Z`
+      let overdueDays = 0;
+      if (dueDate && finishDate > dueDate) {
+        const [dueY, dueM, dueD] = dueDate.split('-').map(Number);
+        const [finY, finM, finD] = finishDate.split('-').map(Number);
+        const dueUtc = Date.UTC(dueY, dueM - 1, dueD);
+        const finUtc = Date.UTC(finY, finM - 1, finD);
+        if (finUtc > dueUtc) {
+          overdueDays = Math.floor((finUtc - dueUtc) / (24 * 60 * 60 * 1000));
+        }
+      }
+
+      const taskOverdueDeduction = clampPercent(
+        overdueDays * safeNumber(config.taskLateDeductionPerDay, 20)
       );
 
-      const completed = new Date(
-        `${completionDate}T00:00:00Z`
-      );
-
-      const completionDays =
-        Number.isFinite(start.getTime()) &&
-        Number.isFinite(completed.getTime())
-          ? Math.max(
-              1,
-              Math.floor(
-                (
-                  calendarDayNumber(completed) -
-                  calendarDayNumber(start)
-                ) /
-                  (24 * 60 * 60 * 1000)
-              ) + 1
-            )
-          : 1;
-
-      const extraDays =
-        Math.max(
-          completionDays -
-            config.taskDeadlineDays,
-          0
-        );
-
-      const taskScore =
-        Math.max(
-          0,
-          100 -
-            (
-              extraDays *
-              config.taskLateDeductionPerDay
-            )
-        );
+      totalTaskOverdueDeductionSum += taskOverdueDeduction;
 
       taskDetails.push({
         id: Number(task.id),
         title: task.title,
         task_type: task.task_type,
         start_date: taskStart,
-        due_date: task.due_date
-          ? dateOnlyValue(task.due_date)
-          : null,
-        completion_date: completionDate,
-        completion_days: completionDays,
-        allowed_days:
-          config.taskDeadlineDays,
-        extra_days: extraDays,
-        score: clampPercent(taskScore),
+        due_date: dueDate,
+        finish_date: finishDate,
+        is_submitted: isSubmitted,
+        overdue_days: overdueDays,
+        overdue_deduction: taskOverdueDeduction,
+        score: clampPercent(100 - taskOverdueDeduction),
         status: task.status
       });
     }
 
-    const taskCount =
-      taskDetails.length;
-
-    const taskTotalScore =
-      taskDetails.reduce(
-        (sum, task) =>
-          sum +
-          safeNumber(task.score, 0),
-        0
-      );
-
-    const maximumTaskScore =
-      taskCount * 100;
+    const taskTotalScore = taskDetails.reduce(
+      (sum, task) => sum + safeNumber(task.score, 0),
+      0
+    );
 
     const taskPerformance =
-      maximumTaskScore > 0
-        ? clampPercent(
-            (
-              taskTotalScore /
-              maximumTaskScore
-            ) * 100
-          )
-        : 100;
+      taskCount > 0
+        ? clampPercent((submittedTaskCount / taskCount) * 100)
+        : 0;
 
     const taskDeduction =
-      clampPercent(
-        100 - taskPerformance
-      );
+      taskCount > 0
+        ? clampPercent(totalTaskOverdueDeductionSum / taskCount)
+        : 0;
 
     /*
      * FINAL:
@@ -5297,6 +5317,8 @@ export async function performanceList(req: Request, res: Response) {
       SELECT json_agg(
         json_build_object(
           'work_date', x.work_date,
+          'status', x.status,
+          'leave_type', x.leave_type,
           'required_minutes', x.required_minutes,
           'worked_minutes', x.worked_minutes,
           'missing_minutes', x.missing_minutes,

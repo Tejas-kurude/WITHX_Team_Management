@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useState } from 'react';
 import { api, messageOf } from '../services/api';
 import { Empty, Modal, PageTitle } from '../components/UI';
 import { useAuth } from '../context/AuthContext';
-import { CheckCircle2, Clock } from 'lucide-react';
+import { CheckCircle2, Clock, XCircle } from 'lucide-react';
 
 function toDateTimeLocal(value: any) {
   if (!value) return '';
@@ -25,7 +25,7 @@ function mergeTaskUpdate(current: any, updated: any) {
   const overdue =
     !!merged.due_date &&
     new Date(merged.due_date).getTime() < Date.now() &&
-    !['COMPLETED', 'CANCELLED'].includes(status);
+    !['COMPLETED', 'REJECTED', 'CANCELLED'].includes(status);
   merged.display_status =
     status === 'REJECTED'
       ? 'REJECTED'
@@ -65,7 +65,12 @@ export default function Tasks() {
   const [emps, setEmps] = useState<any[]>([]);
   const [deps, setDeps] = useState<any[]>([]);
 
-  const [taskTab, setTaskTab] = useState<'active' | 'past'>('active');
+  const [taskTab, setTaskTab] = useState<'pending' | 'completed' | 'rejected'>('pending');
+  const [tabCounts, setTabCounts] = useState<{ pending: number; completed: number; rejected: number }>({
+    pending: 0,
+    completed: 0,
+    rejected: 0,
+  });
 
   const [show, setShow] = useState(false);
   const [editing, setEditing] = useState<any | null>(null);
@@ -131,39 +136,51 @@ export default function Tasks() {
     try {
       setPageErr('');
 
-      const params: any = {
+      const baseParams: any = {
         ...filters,
-        statusGroup: drafts ? undefined : tab,
+        status: drafts ? 'DRAFT' : (filters.status || undefined),
+        _ts: Date.now(),
       };
-      if (drafts) {
-        params.status = 'DRAFT';
-      }
 
-      const r = await api.get('/tasks', {
-        params,
+      const [allRes, currentRes] = await Promise.all([
+        api.get('/tasks', {
+          params: { ...baseParams, status: undefined, statusGroup: undefined },
+        }),
+        api.get('/tasks', {
+          params: {
+            ...baseParams,
+            statusGroup: drafts ? undefined : tab,
+          },
+        }),
+      ]);
+
+      const allRows = Array.isArray(allRes.data) ? allRes.data : [];
+      const currentRows = Array.isArray(currentRes.data) ? currentRes.data : [];
+
+      const adminEmployeeIds = new Set(
+        emps
+          .filter((e) => e.role === 'ADMIN')
+          .map((e) => Number(e.id))
+      );
+
+      const filterAdmin = (list: any[]) =>
+        adminOnly ? list.filter((t) => adminEmployeeIds.has(Number(t.assigned_to))) : list;
+
+      const filteredAll = filterAdmin(allRows);
+      const filteredCurrent = filterAdmin(currentRows);
+
+      setTabCounts({
+        pending: filteredAll.filter((t: any) => !['COMPLETED', 'REJECTED', 'DRAFT'].includes(t.status)).length,
+        completed: filteredAll.filter((t: any) => t.status === 'COMPLETED').length,
+        rejected: filteredAll.filter((t: any) => t.status === 'REJECTED').length,
       });
 
-      const taskRows = Array.isArray(r.data)
-        ? r.data
-        : [];
-
-      const visibleRows = adminOnly
-        ? taskRows.filter((task: any) => {
-            const adminEmployeeIds = new Set(
-              emps
-                .filter((e) => e.role === 'ADMIN')
-                .map((e) => Number(e.id))
-            );
-            return adminEmployeeIds.has(Number(task.assigned_to));
-          })
-        : taskRows;
-
-      setRows(visibleRows);
+      setRows(filteredCurrent);
 
       // Keep the open task-details modal synchronized with the latest
       // server response after status/submission/review changes.
       if (selectedTask) {
-        const refreshedTask = visibleRows.find(
+        const refreshedTask = filteredAll.find(
           (task: any) => Number(task.id) === Number(selectedTask.id)
         );
         if (refreshedTask) {
@@ -515,6 +532,10 @@ export default function Tasks() {
      EMPLOYEE STATUS CHANGE
   ========================================================= */
 
+  /* =========================================================
+     EMPLOYEE STATUS CHANGE
+  ========================================================= */
+
   async function changeEmployeeStatus(
     id: number,
     status: string
@@ -536,12 +557,20 @@ export default function Tasks() {
       });
 
       if (response.data) {
+        const nextStatus = String(response.data.status || status).toUpperCase();
+        const matchesTab =
+          (taskTab === 'pending' && !['COMPLETED', 'REJECTED', 'DRAFT'].includes(nextStatus)) ||
+          (taskTab === 'completed' && nextStatus === 'COMPLETED') ||
+          (taskTab === 'rejected' && nextStatus === 'REJECTED');
+
         setRows((prev) =>
-          prev.map((task) =>
-            Number(task.id) === Number(id)
-              ? mergeTaskUpdate(task, response.data)
-              : task
-          )
+          matchesTab
+            ? prev.map((task) =>
+                Number(task.id) === Number(id)
+                  ? mergeTaskUpdate(task, response.data)
+                  : task
+              )
+            : prev.filter((task) => Number(task.id) !== Number(id))
         );
         setSelectedTask((prev: any) =>
           prev && Number(prev.id) === Number(id)
@@ -623,25 +652,28 @@ export default function Tasks() {
           fd.get('proofUrl') || ''
         ).trim();
 
-      const proofType =
-        submitTask.task_type === 'NON_TECHNICAL'
-          ? 'GOOGLE_DRIVE'
-          : 'GITHUB';
-
       if (!completionSummary) {
         setErr('Completion summary is required.');
         return;
       }
 
-      if (!proofUrl) {
-        setErr('Proof link is required.');
-        return;
+      if (proofUrl) {
+        try {
+          const parsed = new URL(proofUrl);
+          if (!['http:', 'https:'].includes(parsed.protocol)) {
+            setErr('Proof link must start with http:// or https://');
+            return;
+          }
+        } catch {
+          setErr('Proof link must be a valid URL.');
+          return;
+        }
       }
 
       await api.post(`/tasks/${submitTask.id}/submit`, {
         completionSummary,
-        proofType,
-        proofUrl,
+        proofType: proofUrl ? 'LINK' : 'NONE',
+        proofUrl: proofUrl || null,
       });
 
       setSelectedTask((prev: any) =>
@@ -713,6 +745,34 @@ export default function Tasks() {
           decision,
           comment,
         }
+      );
+
+      const nextStatus =
+        decision === 'REJECT'
+          ? 'REJECTED'
+          : decision === 'NEEDS_CHANGES'
+          ? 'NEEDS_CHANGES'
+          : (user?.role === 'SUPER_ADMIN' ? 'COMPLETED' : 'SUBMITTED');
+
+      const matchesTab =
+        (taskTab === 'pending' && !['COMPLETED', 'REJECTED', 'DRAFT'].includes(nextStatus)) ||
+        (taskTab === 'completed' && nextStatus === 'COMPLETED') ||
+        (taskTab === 'rejected' && nextStatus === 'REJECTED');
+
+      setRows((prev) =>
+        matchesTab
+          ? prev.map((t) =>
+              Number(t.id) === Number(reviewTask.id)
+                ? { ...t, status: nextStatus, display_status: nextStatus }
+                : t
+            )
+          : prev.filter((t) => Number(t.id) !== Number(reviewTask.id))
+      );
+
+      setSelectedTask((prev: any) =>
+        prev && Number(prev.id) === Number(reviewTask.id)
+          ? { ...prev, status: nextStatus, display_status: nextStatus }
+          : prev
       );
 
       setShowReview(false);
@@ -1026,60 +1086,87 @@ async function toggleReviewHistory(task: any) {
 
       {teamView !== 'list' && <>
       {/* =====================================================
-          TASK TABS (ACTIVE VS PAST)
+          TASK TABS (PENDING, COMPLETED, REJECTED)
       ====================================================== */}
       <div className="flex items-center gap-2 mb-4 border-b border-slate-200 pb-3">
         <button
           type="button"
           onClick={() => {
-            setTaskTab('active');
+            setTaskTab('pending');
             setShowDrafts(false);
             setFilters((prev: any) => ({ ...prev, status: '' }));
-            void load(showAdminTasks, 'active', false);
+            void load(showAdminTasks, 'pending', false);
           }}
           className={`px-4 py-2.5 text-sm font-extrabold rounded-xl transition-all flex items-center gap-2 ${
-            taskTab === 'active' && !showDrafts
+            taskTab === 'pending' && !showDrafts
               ? 'bg-navy text-white shadow-sm'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
         >
-          <CheckCircle2 size={16} />
-          Active Tasks
+          <Clock size={16} />
+          Pending
           <span
             className={`text-[11px] px-2 py-0.5 rounded-full ${
-              taskTab === 'active' && !showDrafts
+              taskTab === 'pending' && !showDrafts
                 ? 'bg-white/20 text-white font-bold'
                 : 'bg-slate-100 text-slate-600 font-bold'
             }`}
           >
-            {taskTab === 'active' && !showDrafts ? rows.length : ''}
+            {tabCounts.pending}
           </span>
         </button>
 
         <button
           type="button"
           onClick={() => {
-            setTaskTab('past');
+            setTaskTab('completed');
             setShowDrafts(false);
             setFilters((prev: any) => ({ ...prev, status: '' }));
-            void load(showAdminTasks, 'past', false);
+            void load(showAdminTasks, 'completed', false);
           }}
           className={`px-4 py-2.5 text-sm font-extrabold rounded-xl transition-all flex items-center gap-2 ${
-            taskTab === 'past' && !showDrafts
-              ? 'bg-navy text-white shadow-sm'
+            taskTab === 'completed' && !showDrafts
+              ? 'bg-emerald-700 text-white shadow-sm'
               : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
           }`}
         >
-          <Clock size={16} />
-          Past Tasks
+          <CheckCircle2 size={16} />
+          Completed
           <span
             className={`text-[11px] px-2 py-0.5 rounded-full ${
-              taskTab === 'past' && !showDrafts
+              taskTab === 'completed' && !showDrafts
                 ? 'bg-white/20 text-white font-bold'
-                : 'bg-slate-100 text-slate-600 font-bold'
+                : 'bg-emerald-50 text-emerald-700 font-bold'
             }`}
           >
-            {taskTab === 'past' && !showDrafts ? rows.length : ''}
+            {tabCounts.completed}
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => {
+            setTaskTab('rejected');
+            setShowDrafts(false);
+            setFilters((prev: any) => ({ ...prev, status: '' }));
+            void load(showAdminTasks, 'rejected', false);
+          }}
+          className={`px-4 py-2.5 text-sm font-extrabold rounded-xl transition-all flex items-center gap-2 ${
+            taskTab === 'rejected' && !showDrafts
+              ? 'bg-red-700 text-white shadow-sm'
+              : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
+          }`}
+        >
+          <XCircle size={16} />
+          Rejected
+          <span
+            className={`text-[11px] px-2 py-0.5 rounded-full ${
+              taskTab === 'rejected' && !showDrafts
+                ? 'bg-white/20 text-white font-bold'
+                : 'bg-red-50 text-red-700 font-bold'
+            }`}
+          >
+            {tabCounts.rejected}
           </span>
         </button>
       </div>
@@ -1113,9 +1200,9 @@ async function toggleReviewHistory(task: any) {
               })
             }
           >
-            <option value="">{taskTab === 'active' ? 'All active statuses' : 'All past tasks'}</option>
-            {taskTab === 'active' ? (
+            {taskTab === 'pending' && (
               <>
+                <option value="">All pending tasks</option>
                 <option value="PENDING">PENDING</option>
                 <option value="IN_PROGRESS">IN_PROGRESS</option>
                 <option value="BLOCKED">BLOCKED</option>
@@ -1123,8 +1210,18 @@ async function toggleReviewHistory(task: any) {
                 <option value="NEEDS_CHANGES">NEEDS_CHANGES</option>
                 <option value="OVERDUE">OVERDUE</option>
               </>
-            ) : (
-              <option value="COMPLETED">COMPLETED</option>
+            )}
+            {taskTab === 'completed' && (
+              <>
+                <option value="">All completed tasks</option>
+                <option value="COMPLETED">COMPLETED</option>
+              </>
+            )}
+            {taskTab === 'rejected' && (
+              <>
+                <option value="">All rejected tasks</option>
+                <option value="REJECTED">REJECTED</option>
+              </>
             )}
           </select>
         )}
@@ -1259,8 +1356,11 @@ async function toggleReviewHistory(task: any) {
                   <th className="px-2.5 py-2.5">Status</th>
                   <th className="px-2.5 py-2.5">Start Date</th>
                   <th className="px-2.5 py-2.5">Deadline</th>
-                  {taskTab === 'past' && (
+                  {taskTab === 'completed' && (
                     <th className="px-2.5 py-2.5 text-emerald-700">Completed Date</th>
+                  )}
+                  {taskTab === 'rejected' && (
+                    <th className="px-2.5 py-2.5 text-red-600">Updated / Rejected</th>
                   )}
                   <th className="px-2.5 py-2.5">Progress</th>
                   <th className="px-2.5 py-2.5 text-center">Action</th>
@@ -1348,10 +1448,17 @@ async function toggleReviewHistory(task: any) {
                           : '—'}
                       </td>
 
-                      {taskTab === 'past' && (
+                      {taskTab === 'completed' && (
                         <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-emerald-700">
                           {t.completed_at
                             ? new Date(t.completed_at).toLocaleString()
+                            : '—'}
+                        </td>
+                      )}
+                      {taskTab === 'rejected' && (
+                        <td className="whitespace-nowrap px-2.5 py-2.5 font-semibold text-red-600">
+                          {t.updated_at
+                            ? new Date(t.updated_at).toLocaleString()
                             : '—'}
                         </td>
                       )}
@@ -1375,24 +1482,42 @@ async function toggleReviewHistory(task: any) {
                         </div>
                       </td>
 
-                      <td className="whitespace-nowrap px-4 py-4 text-center">
-                        <button
-                          type="button"
-                          className="btn btn-primary !px-4 !py-2"
-                          onClick={() => {
-                            setSelectedTask(t);
-                            if (isEditedTask) {
-                              markEditedTaskSeen(t);
-                            }
-                            setFlippedTaskId(null);
-                            setHistoryError((prev) => ({
-                              ...prev,
-                              [Number(t.id)]: '',
-                            }));
-                          }}
-                        >
-                          View Details
-                        </button>
+                      <td className="whitespace-nowrap px-3 py-3 text-center">
+                        <div className="flex items-center justify-center gap-2">
+                          <button
+                            type="button"
+                            className="btn btn-primary !px-3 !py-1.5 text-xs"
+                            onClick={() => {
+                              setSelectedTask(t);
+                              if (isEditedTask) {
+                                markEditedTaskSeen(t);
+                              }
+                              setFlippedTaskId(null);
+                              setHistoryError((prev) => ({
+                                ...prev,
+                                [Number(t.id)]: '',
+                              }));
+                            }}
+                          >
+                            Details
+                          </button>
+                          {isReviewer &&
+                            (t.can_review === true ||
+                              Number(t.progress) >= 100 ||
+                              t.status === 'SUBMITTED' ||
+                              (t.status === 'COMPLETED' &&
+                                t.super_admin_review_decision !== 'APPROVE' &&
+                                t.super_admin_review_decision !== 'APPROVED')) &&
+                            !['REJECTED', 'NEEDS_CHANGES', 'DRAFT', 'CANCELLED'].includes(t.status) && (
+                              <button
+                                type="button"
+                                className="btn btn-accent !px-3 !py-1.5 text-xs"
+                                onClick={() => openReviewModal(t)}
+                              >
+                                Review
+                              </button>
+                            )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -1430,15 +1555,18 @@ async function toggleReviewHistory(task: any) {
           isAssignedEmployee &&
           t.status === 'IN_PROGRESS' &&
           Number(t.progress) < 100;
-        const canCurrentUserReview =
-          isReviewer &&
-          t.can_review === true &&
-          t.status === 'SUBMITTED' &&
-          t.display_status !== 'REJECTED' &&
-          t.display_status !== 'NEEDS_CHANGES';
         const superAdminApproved =
           t.super_admin_review_decision === 'APPROVE' ||
           t.super_admin_review_decision === 'APPROVED';
+        const canCurrentUserReview =
+          isReviewer &&
+          (t.can_review === true ||
+            Number(t.progress) >= 100 ||
+            t.status === 'SUBMITTED' ||
+            (t.status === 'COMPLETED' && !superAdminApproved)) &&
+          t.display_status !== 'REJECTED' &&
+          t.display_status !== 'NEEDS_CHANGES' &&
+          t.status !== 'DRAFT';
         const rejectionReviewerName =
           t.hierarchy_review_status === 'REJECTED_BY_TEAM_LEAD'
             ? t.lead_reviewer_name
@@ -2729,40 +2857,25 @@ async function toggleReviewHistory(task: any) {
 
               <div>
                 <label className="label">
-                  Proof / Evidence *
+                  Proof / Evidence Link (Optional)
                 </label>
 
                 <div className="mb-2 rounded-lg bg-slate-50 p-3 text-sm">
-
-                  {submitTask.task_type ===
-                  'NON_TECHNICAL' ? (
+                  {submitTask.task_type === 'NON_TECHNICAL' ? (
                     <>
-                      <b>
-                        Google Drive
-                      </b>
-
+                      <b>Google Drive / Docs</b>
                       <div className="mt-1 text-xs muted">
-                        Upload your completed
-                        work to Google Drive and
-                        paste the shareable link
-                        below.
+                        Optional: Upload your completed work to Google Drive and paste the shareable link below.
                       </div>
                     </>
                   ) : (
                     <>
-                      <b>
-                        GitHub
-                      </b>
-
+                      <b>GitHub / Repository</b>
                       <div className="mt-1 text-xs muted">
-                        Provide the GitHub
-                        repository, commit or
-                        pull request containing
-                        your completed work.
+                        Optional: Provide a GitHub repository, commit, or pull request link containing your completed work.
                       </div>
                     </>
                   )}
-
                 </div>
 
                 <input
@@ -2771,18 +2884,14 @@ async function toggleReviewHistory(task: any) {
                   type="url"
                   placeholder={
                     submitTask.task_type === 'NON_TECHNICAL'
-                      ? 'https://drive.google.com/...'
-                      : 'https://github.com/...'
+                      ? 'https://drive.google.com/... (optional)'
+                      : 'https://github.com/... (optional)'
                   }
-                  required
                 />
 
                 <div className="mt-1 text-xs muted">
-                  {submitTask.task_type === 'NON_TECHNICAL'
-                    ? 'Paste a shareable Google Drive or Google Docs link.'
-                    : 'Paste a GitHub repository, commit, or pull request link.'}
+                  Optional: Add any link to your deliverables, code, or document.
                 </div>
-
               </div>
 
               <div className="rounded-lg bg-blue-50 p-3 text-xs text-blue-800">
